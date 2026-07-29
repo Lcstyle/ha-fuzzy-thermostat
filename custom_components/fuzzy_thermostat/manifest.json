@@ -1,0 +1,12 @@
+{
+  "domain": "fuzzy_thermostat",
+  "name": "Fuzzy Thermostat",
+  "codeowners": [],
+  "dependencies": [],
+  "documentation": "https://github.com/Lcstyle/ha-fuzzy-thermostat",
+  "integration_type": "helper",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/Lcstyle/ha-fuzzy-thermostat/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

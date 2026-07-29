@@ -1,0 +1,29 @@
+# Example wiring for both modes. Entity ids are illustrative.
+
+climate:
+  # A mini-split governed as a supervisor: the fuzzy layer picks the setpoint
+  # (within 70-73F, sliding with outdoor conditions) and decides when the unit
+  # runs; the unit keeps its own compressor logic.
+  - platform: fuzzy_thermostat
+    name: Study
+    climate_entity: climate.study_minisplit
+    direction: cool
+    target_sensor: sensor.study_temperature
+    outdoor_sensor: sensor.outdoor_temperature
+    forecast_high_sensor: sensor.forecast_high
+    comfort_min: 70
+    comfort_max: 73
+    outdoor_mild: 72        # at/below this, aim for comfort_max, wide margin
+    outdoor_torrid: 92      # at/above this, aim for comfort_min, narrow margin
+    margin_wide: 2.5
+    margin_narrow: 1.0
+
+  # A plain heater switch, generic_thermostat style, but with fuzzy demand
+  # and trend-aware anti-overshoot instead of a fixed hysteresis band.
+  - platform: fuzzy_thermostat
+    name: Workshop
+    heater: switch.workshop_heater
+    target_sensor: sensor.workshop_temperature
+    comfort_min: 17
+    comfort_max: 21
+    min_cycle_duration: "00:10:00"
