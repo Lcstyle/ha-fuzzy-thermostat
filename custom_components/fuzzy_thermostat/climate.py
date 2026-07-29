@@ -80,6 +80,7 @@ from .const import (
     ATTR_TREND,
     CONF_CLIMATE_ENTITY,
     CONF_COMFORT_MAX,
+    CONF_CONTROL_STYLE,
     CONF_COMFORT_MIN,
     CONF_COOLER,
     CONF_DEMAND_OFF,
@@ -114,6 +115,8 @@ from .const import (
     DEFAULTS_BY_UNIT,
     DIRECTION_COOL,
     DIRECTION_HEAT,
+    STYLE_CYCLING,
+    STYLE_SETPOINT,
 )
 from .fuzzy import (
     build_command_controller,
@@ -160,6 +163,16 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
             CONF_TREND_WINDOW, default=timedelta(seconds=DEFAULT_TREND_WINDOW_S)
         ): cv.positive_time_period,
         vol.Optional(CONF_MANAGE_POWER, default=True): cv.boolean,
+        # Supervisor control style. `setpoint` (default): the wrapped device
+        # stays ON while this entity is on, and the ONLY control output is its
+        # setpoint — inverter units modulate their own compressor, and even
+        # fixed-speed units run their own hysteresis at whatever setpoint they
+        # are handed. Power-cycling a modulating unit defeats it. `cycling`
+        # restores margin/demand-gated on/off for devices that should be
+        # duty-cycled. Switch mode always cycles — a relay has no setpoint.
+        vol.Optional(CONF_CONTROL_STYLE, default=STYLE_SETPOINT): vol.In(
+            [STYLE_SETPOINT, STYLE_CYCLING]
+        ),
         # Load compensation: all three or none. The sensor is any numeric proxy
         # for internal dissipation (CPU package temp, plug wattage, rack temp);
         # the breakpoints carry its units.
@@ -220,6 +233,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         self._outdoor = config.get(CONF_OUTDOOR_SENSOR)
         self._forecast_high = config.get(CONF_FORECAST_HIGH_SENSOR)
         self._manage_power = config[CONF_MANAGE_POWER]
+        self._style = config[CONF_CONTROL_STYLE]
 
         # Direction: a heater switch always heats, a cooler always cools; the
         # wrapped-climate form takes it from `direction`.
@@ -347,6 +361,12 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             # guard — nothing would ever retry it, and the equipment would keep
             # running while this entity reported off.
             await self._async_actuate(False, reason="turned off", force=True)
+        elif self._wrapped and self._style == STYLE_SETPOINT:
+            # Setpoint style: enabling this entity turns the device on ONCE;
+            # from here the only ongoing output is the setpoint. If someone
+            # later turns the unit off at its own remote we do not fight them —
+            # occupancy re-enables it via this entity, not a 5-minute nag loop.
+            await self._async_actuate(True, reason="enabled", force=True)
         await self._async_control()
 
     # -- sampling ----------------------------------------------------------
@@ -497,6 +517,22 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
 
         if self._attr_hvac_mode == HVACMode.OFF:
             self._extra[ATTR_CONTROL_REASON] = "idle: thermostat is off"
+            self.async_write_ha_state()
+            return
+
+        if self._wrapped and self._style == STYLE_SETPOINT:
+            # Setpoint governance: no power gating at all. The device stays on
+            # and its own controller — inverter ramp or fixed-speed hysteresis
+            # — meets the (fuzzy-computed, channel-fused) setpoint we maintain.
+            if self._actuator_on:
+                await self._async_send_setpoint()
+                self._extra[ATTR_CONTROL_REASON] = (
+                    f"governing setpoint {round(self._effective_target * 2) / 2:g}"
+                )
+            else:
+                self._extra[ATTR_CONTROL_REASON] = (
+                    "device is off (switched off externally; re-enable via this entity)"
+                )
             self.async_write_ha_state()
             return
 

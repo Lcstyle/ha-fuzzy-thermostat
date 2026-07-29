@@ -94,11 +94,15 @@ The three drivers — weather (full range), internal load (two thirds),
 humidity (one third) — fuse as **max()**: the setpoint is as aggressive as the
 strongest driver demands, and no mild channel ever dilutes a strong one.
 
-**Supervisor mode** — for equipment that already runs its own compressor
-logic (mini-splits, smart heat pumps): the fuzzy layer governs the device's
-*setpoint* (rate-limited so the unit is not chattered) and, optionally, when
-it runs at all. It deliberately does **not** micro-manage equipment that has
-its own protections.
+**Supervisor mode** — for equipment that already runs its own controller
+(mini-splits, smart heat pumps). Default style is **setpoint governance**: the
+device stays on while this entity is on, and the only ongoing output is its
+setpoint — inverter units modulate their compressor to meet it, and even
+fixed-speed units run their own hysteresis at whatever setpoint they are
+handed. Power-cycling a modulating unit defeats its design; the fuzzy layer
+moves the target, not the power. Setpoint changes are slew-limited so the
+device is never chattered. `control_style: cycling` restores demand-gated
+on/off for devices that genuinely should be duty-cycled.
 
 ## Install
 
@@ -145,6 +149,7 @@ climate:
 | `min_cycle_duration` | 10 min | compressor/switch protection |
 | `trend_window` | 20 min | slope window for the trend input |
 | `manage_power` | `true` | supervisor may switch the device on/off |
+| `control_style` | `setpoint` | supervisor style: govern the setpoint, or `cycling` |
 | `load_sensor` | — | internal-load proxy (enables load compensation) |
 | `load_light` / `load_heavy` | — | sensor values meaning "idle" / "flat out" |
 | `humidity_sensor` | — | indoor RH sensor (enables humidity compensation) |
