@@ -602,15 +602,22 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
                 self._actuator_on = on
                 self._last_switch = now
                 return
-            service = SERVICE_SET_HVAC_MODE
             mode = (
                 (HVACMode.HEAT if self._direction == DIRECTION_HEAT else HVACMode.COOL)
                 if on
                 else HVACMode.OFF
             )
+            # STATE-DRIVEN OUTPUT: if the device is already in the mode we
+            # want, adopt it silently — do not re-assert. Every redundant
+            # command is a beep from the unit confirming nothing.
+            wstate = self.hass.states.get(self._wrapped)
+            if wstate is not None and wstate.state == mode:
+                self._actuator_on = on
+                self._last_switch = now
+                return
             await self.hass.services.async_call(
                 CLIMATE_DOMAIN,
-                service,
+                SERVICE_SET_HVAC_MODE,
                 {ATTR_ENTITY_ID: self._wrapped, "hvac_mode": mode},
                 blocking=True,
             )
@@ -660,11 +667,27 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
                 self._companion_owned = []
 
     async def _async_send_setpoint(self) -> None:
-        """Supervisor mode: govern the wrapped device's setpoint, gently."""
-        target = round(self._effective_target * 2) / 2  # most units take halves
+        """Supervisor mode: govern the wrapped device's setpoint, gently.
+
+        STATE-DRIVEN OUTPUT, not periodic re-assertion: the target is rounded
+        to the DEVICE's own setpoint step (a unit that takes whole degrees
+        never sees halves — quantizing to a finer grid than the device's makes
+        a noisy input channel flap the command across a rounding boundary),
+        and nothing is sent if the device already holds that value. The unit
+        beeps per command; a correct controller is silent in steady state.
+        """
+        wstate = self.hass.states.get(self._wrapped)
+        if wstate is None or wstate.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return
+        step = wstate.attributes.get("target_temp_step") or 0.5
+        target = round(self._effective_target / step) * step
+        current = wstate.attributes.get(ATTR_TEMPERATURE)
+        if current is not None and abs(float(current) - target) < step / 2:
+            self._last_sent_setpoint = target  # device already there
+            return
         if (
             self._last_sent_setpoint is not None
-            and abs(target - self._last_sent_setpoint) < 0.3
+            and abs(target - self._last_sent_setpoint) < step / 2
         ):
             return
         await self.hass.services.async_call(
