@@ -243,6 +243,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         self._manage_power = config[CONF_MANAGE_POWER]
         self._style = config[CONF_CONTROL_STYLE]
         self._companions: list[str] = config.get(CONF_COMPANION_ENTITIES) or []
+        self._companion_owned: list[str] = []
 
         # Direction: a heater switch always heats, a cooler always cools; the
         # wrapped-climate form takes it from `direction`.
@@ -630,14 +631,33 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         )
         # Companions ride the same edge, through the same choke point, so
         # every style (setpoint enable/disable, cycling gates, switch mode)
-        # carries them for free.
+        # carries them for free. MANUAL CONTROL IS SOVEREIGN: claim only
+        # companions that are currently off — one already running was someone
+        # else's decision — and on stop, release only what was claimed.
         if self._companions:
-            await self.hass.services.async_call(
-                "homeassistant",
-                SERVICE_TURN_ON if on else SERVICE_TURN_OFF,
-                {ATTR_ENTITY_ID: self._companions},
-                blocking=False,
-            )
+            if on:
+                claim = []
+                for eid in self._companions:
+                    st = self.hass.states.get(eid)
+                    if st is not None and st.state == "off":
+                        claim.append(eid)
+                self._companion_owned = claim
+                if claim:
+                    await self.hass.services.async_call(
+                        "homeassistant",
+                        SERVICE_TURN_ON,
+                        {ATTR_ENTITY_ID: claim},
+                        blocking=False,
+                    )
+            else:
+                if self._companion_owned:
+                    await self.hass.services.async_call(
+                        "homeassistant",
+                        SERVICE_TURN_OFF,
+                        {ATTR_ENTITY_ID: self._companion_owned},
+                        blocking=False,
+                    )
+                self._companion_owned = []
 
     async def _async_send_setpoint(self) -> None:
         """Supervisor mode: govern the wrapped device's setpoint, gently."""
