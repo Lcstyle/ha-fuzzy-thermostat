@@ -349,6 +349,19 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
 
     async def _async_control(self) -> None:
         now = dt_util.utcnow()
+
+        # Supervisor mode: adopt the wrapped device's real state every cycle.
+        # Restarts, manual remote presses and other automations all change the
+        # device behind our back; believing a stale _actuator_on means an off
+        # command no-ops ("already off") while the compressor keeps running.
+        if self._wrapped:
+            wstate = self.hass.states.get(self._wrapped)
+            if wstate is not None and wstate.state not in (
+                STATE_UNAVAILABLE,
+                STATE_UNKNOWN,
+            ):
+                self._actuator_on = wstate.state != HVACMode.OFF
+
         room = self._read_float(self._sensor)
         if room is None:
             # Fail safe: no reading, no action. An unavailable sensor must
