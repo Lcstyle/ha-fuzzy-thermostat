@@ -32,6 +32,7 @@ STYLE_CYCLING = "cycling"
 CONF_LOAD_SENSOR = "load_sensor"
 CONF_LOAD_LIGHT = "load_light"
 CONF_LOAD_HEAVY = "load_heavy"
+CONF_LOAD_SMOOTHING = "load_smoothing"
 CONF_HUMIDITY_SENSOR = "humidity_sensor"
 CONF_HUMIDITY_DRY = "humidity_dry"
 CONF_HUMIDITY_HUMID = "humidity_humid"
@@ -48,11 +49,14 @@ ATTR_CONTROL_REASON = "control_reason"
 ATTR_OUTDOOR_DRIVE = "outdoor_drive"
 ATTR_OUTDOOR_POSITION = "outdoor_position"
 ATTR_LOAD_POSITION = "load_position"
+ATTR_LOAD_SMOOTHED = "load_smoothed"
+ATTR_HELD_SETPOINT = "held_setpoint"
 ATTR_HUMIDITY_POSITION = "humidity_position"
 ATTR_INDOOR_HUMIDITY = "indoor_humidity"
 
 # Defaults that do not depend on the unit system.
 DEFAULT_SAMPLE_INTERVAL_S = 300
+DEFAULT_LOAD_SMOOTHING_S = 900
 # The margin (target + margin) is the intended binding start gate; demand only
 # contributes direction and trend damping. At 0.35 on a wide temperature
 # universe the demand gate accidentally out-ranked the margin and would hold

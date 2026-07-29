@@ -28,6 +28,7 @@ Design rules carried throughout:
 from __future__ import annotations
 
 import logging
+import math
 from collections import deque
 from datetime import datetime, timedelta
 from typing import Any
@@ -75,6 +76,8 @@ from .const import (
     ATTR_HUMIDITY_POSITION,
     ATTR_INDOOR_HUMIDITY,
     ATTR_LOAD_POSITION,
+    ATTR_LOAD_SMOOTHED,
+    ATTR_HELD_SETPOINT,
     ATTR_OUTDOOR_DRIVE,
     ATTR_OUTDOOR_POSITION,
     ATTR_TREND,
@@ -95,6 +98,7 @@ from .const import (
     CONF_LOAD_HEAVY,
     CONF_LOAD_LIGHT,
     CONF_LOAD_SENSOR,
+    CONF_LOAD_SMOOTHING,
     CONF_MANAGE_POWER,
     CONF_MARGIN_NARROW,
     CONF_MARGIN_WIDE,
@@ -112,6 +116,7 @@ from .const import (
     DEFAULT_DEMAND_ON,
     DEFAULT_MIN_CYCLE_S,
     DEFAULT_SAMPLE_INTERVAL_S,
+    DEFAULT_LOAD_SMOOTHING_S,
     DEFAULT_TREND_WINDOW_S,
     DEFAULTS_BY_UNIT,
     DIRECTION_COOL,
@@ -186,6 +191,10 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         # the breakpoints carry its units.
         vol.Inclusive(CONF_LOAD_SENSOR, "load"): cv.entity_id,
         vol.Inclusive(CONF_LOAD_LIGHT, "load"): vol.Coerce(float),
+        vol.Optional(
+            CONF_LOAD_SMOOTHING,
+            default=timedelta(seconds=DEFAULT_LOAD_SMOOTHING_S),
+        ): cv.positive_time_period,
         vol.Inclusive(CONF_LOAD_HEAVY, "load"): vol.Coerce(float),
         # Humidity compensation: RH% is universal, so the breakpoints have
         # safe defaults and only the sensor is needed to enable it.
@@ -282,6 +291,9 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             config.get(CONF_OUTDOOR_TORRID, unit_default("outdoor_torrid")),
         )
         self._load_sensor = config.get(CONF_LOAD_SENSOR)
+        self._load_tau = config[CONF_LOAD_SMOOTHING].total_seconds()
+        self._load_ema: float | None = None
+        self._load_ema_ts: datetime | None = None
         self._load = (
             build_load_controller(config[CONF_LOAD_LIGHT], config[CONF_LOAD_HEAVY])
             if self._load_sensor
@@ -474,6 +486,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         if self._load is not None and self._direction == DIRECTION_COOL:
             load_value = self._read_float(self._load_sensor)
             if load_value is not None:
+                load_value = self._smooth_load(load_value, now)
                 p_load = self._load.evaluate({"load": load_value}).value
         if self._humidity is not None and self._direction == DIRECTION_COOL:
             indoor_humidity = self._read_float(self._humidity_sensor)
@@ -515,6 +528,10 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             ATTR_OUTDOOR_DRIVE: outdoor_drive,
             ATTR_OUTDOOR_POSITION: round(p_outdoor, 3) if p_outdoor is not None else None,
             ATTR_LOAD_POSITION: round(p_load, 3) if p_load is not None else None,
+            ATTR_LOAD_SMOOTHED: round(self._load_ema, 1)
+            if self._load_ema is not None
+            else None,
+            ATTR_HELD_SETPOINT: self._last_sent_setpoint,
             ATTR_HUMIDITY_POSITION: round(p_humidity, 3)
             if p_humidity is not None
             else None,
@@ -536,8 +553,11 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             # — meets the (fuzzy-computed, channel-fused) setpoint we maintain.
             if self._actuator_on:
                 await self._async_send_setpoint()
+                self._extra[ATTR_HELD_SETPOINT] = self._last_sent_setpoint
                 self._extra[ATTR_CONTROL_REASON] = (
-                    f"governing setpoint {round(self._effective_target * 2) / 2:g}"
+                    f"governing setpoint {self._last_sent_setpoint:g}"
+                    if self._last_sent_setpoint is not None
+                    else "governing (device setpoint unknown)"
                 )
             else:
                 self._extra[ATTR_CONTROL_REASON] = (
@@ -666,6 +686,24 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
                     )
                 self._companion_owned = []
 
+    def _smooth_load(self, value: float, now: datetime) -> float:
+        """The room integrates heat over tens of minutes; load PROXIES (package
+        temps, power meters) move in seconds. Feed the channel the thermal
+        average, not the flicker — sampling the flicker at control cadence
+        aliases it straight into the setpoint. Set load_smoothing: 0 to
+        disable for a proxy that is already slow."""
+        if self._load_tau <= 0:
+            return value
+        if self._load_ema is None or self._load_ema_ts is None:
+            self._load_ema = value
+        else:
+            dt = max((now - self._load_ema_ts).total_seconds(), 0.0)
+            self._load_ema += (1.0 - math.exp(-dt / self._load_tau)) * (
+                value - self._load_ema
+            )
+        self._load_ema_ts = now
+        return self._load_ema
+
     async def _async_send_setpoint(self) -> None:
         """Supervisor mode: govern the wrapped device's setpoint, gently.
 
@@ -680,9 +718,21 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         if wstate is None or wstate.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return
         step = wstate.attributes.get("target_temp_step") or 0.5
-        target = round(self._effective_target / step) * step
-        current = wstate.attributes.get(ATTR_TEMPERATURE)
-        if current is not None and abs(float(current) - target) < step / 2:
+        raw = self._effective_target
+        held = wstate.attributes.get(ATTR_TEMPERATURE)
+        if held is not None:
+            held = float(held)
+            # Schmitt gate: the setpoint the device already holds is the
+            # anchor. Do not move off it until the target is DECISIVELY
+            # elsewhere (3/4 of a device step) — residual channel wobble
+            # around a grid boundary must never flap the command. A real
+            # change (a degree of weather, sustained load) clears this
+            # easily; noise never does.
+            if abs(raw - held) < 0.75 * step:
+                self._last_sent_setpoint = held
+                return
+        target = round(raw / step) * step
+        if held is not None and abs(held - target) < step / 2:
             self._last_sent_setpoint = target  # device already there
             return
         if (

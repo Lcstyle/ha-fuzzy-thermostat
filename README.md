@@ -153,6 +153,7 @@ climate:
 | `companion_entities` | — | stateful fans/dampers switched with the conditioning |
 | `load_sensor` | — | internal-load proxy (enables load compensation) |
 | `load_light` / `load_heavy` | — | sensor values meaning "idle" / "flat out" |
+| `load_smoothing` | duration | `"00:15:00"` | EMA time constant applied to the load sensor before fuzzification. The room integrates heat over tens of minutes; fast proxies (CPU temps, power meters) must not alias their flicker into the setpoint. `0` disables. |
 | `humidity_sensor` | — | indoor RH sensor (enables humidity compensation) |
 | `humidity_dry` / `humidity_humid` | 45 / 75 %RH | breakpoints for the humidity channel |
 | `min_temp` / `max_temp` | 45/95 °F, 7/35 °C | universe bounds for the linguistic terms |
