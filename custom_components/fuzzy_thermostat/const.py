@@ -28,6 +28,9 @@ CONF_MANAGE_POWER = "manage_power"
 CONF_LOAD_SENSOR = "load_sensor"
 CONF_LOAD_LIGHT = "load_light"
 CONF_LOAD_HEAVY = "load_heavy"
+CONF_HUMIDITY_SENSOR = "humidity_sensor"
+CONF_HUMIDITY_DRY = "humidity_dry"
+CONF_HUMIDITY_HUMID = "humidity_humid"
 
 DIRECTION_COOL = "cool"
 DIRECTION_HEAT = "heat"
@@ -41,6 +44,8 @@ ATTR_CONTROL_REASON = "control_reason"
 ATTR_OUTDOOR_DRIVE = "outdoor_drive"
 ATTR_OUTDOOR_POSITION = "outdoor_position"
 ATTR_LOAD_POSITION = "load_position"
+ATTR_HUMIDITY_POSITION = "humidity_position"
+ATTR_INDOOR_HUMIDITY = "indoor_humidity"
 
 # Defaults that do not depend on the unit system.
 DEFAULT_SAMPLE_INTERVAL_S = 300

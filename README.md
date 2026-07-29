@@ -82,6 +82,18 @@ relax what a hot day already requires. The load channel deliberately tops out
 at two-thirds of the range: a flat-out computer in a mild week should not
 command the same setpoint floor as a heatwave.
 
+**Humidity compensation** — optional. Thermal comfort is a feels-like
+judgment: the same temperature reads comfortable at 45% RH and clammy at 75%.
+An indoor humidity sensor biases the setpoint downward as the air gets muggier
+— compensating perception and putting the compressor to work as a
+dehumidifier. Capped at one third of the range: humidity shifts how a
+temperature feels by about a degree, it is not a heat source. Indoor RH is the
+right input; it already integrates outdoor humidity and infiltration.
+
+The three drivers — weather (full range), internal load (two thirds),
+humidity (one third) — fuse as **max()**: the setpoint is as aggressive as the
+strongest driver demands, and no mild channel ever dilutes a strong one.
+
 **Supervisor mode** — for equipment that already runs its own compressor
 logic (mini-splits, smart heat pumps): the fuzzy layer governs the device's
 *setpoint* (rate-limited so the unit is not chattered) and, optionally, when
@@ -135,6 +147,8 @@ climate:
 | `manage_power` | `true` | supervisor may switch the device on/off |
 | `load_sensor` | — | internal-load proxy (enables load compensation) |
 | `load_light` / `load_heavy` | — | sensor values meaning "idle" / "flat out" |
+| `humidity_sensor` | — | indoor RH sensor (enables humidity compensation) |
+| `humidity_dry` / `humidity_humid` | 45 / 75 %RH | breakpoints for the humidity channel |
 | `min_temp` / `max_temp` | 45/95 °F, 7/35 °C | universe bounds for the linguistic terms |
 
 ## Observability
@@ -170,7 +184,7 @@ unreadable room is never treated as a comfortable one.
 ## Tests
 
 ```
-python3 -m pytest tests/    # 49 tests, pure python, no HA install needed
+python3 -m pytest tests/    # 51 tests, pure python, no HA install needed
 ```
 
 The suite covers membership geometry, the inference pipeline, the published

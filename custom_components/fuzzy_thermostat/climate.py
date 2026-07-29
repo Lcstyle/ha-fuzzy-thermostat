@@ -72,6 +72,8 @@ from .const import (
     ATTR_CONTROL_REASON,
     ATTR_FUZZY_DEMAND,
     ATTR_FUZZY_TARGET,
+    ATTR_HUMIDITY_POSITION,
+    ATTR_INDOOR_HUMIDITY,
     ATTR_LOAD_POSITION,
     ATTR_OUTDOOR_DRIVE,
     ATTR_OUTDOOR_POSITION,
@@ -85,6 +87,9 @@ from .const import (
     CONF_DIRECTION,
     CONF_FORECAST_HIGH_SENSOR,
     CONF_HEATER,
+    CONF_HUMIDITY_DRY,
+    CONF_HUMIDITY_HUMID,
+    CONF_HUMIDITY_SENSOR,
     CONF_LOAD_HEAVY,
     CONF_LOAD_LIGHT,
     CONF_LOAD_SENSOR,
@@ -112,6 +117,7 @@ from .const import (
 )
 from .fuzzy import (
     build_command_controller,
+    build_humidity_controller,
     build_load_controller,
     build_setpoint_controller,
 )
@@ -160,6 +166,11 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Inclusive(CONF_LOAD_SENSOR, "load"): cv.entity_id,
         vol.Inclusive(CONF_LOAD_LIGHT, "load"): vol.Coerce(float),
         vol.Inclusive(CONF_LOAD_HEAVY, "load"): vol.Coerce(float),
+        # Humidity compensation: RH% is universal, so the breakpoints have
+        # safe defaults and only the sensor is needed to enable it.
+        vol.Optional(CONF_HUMIDITY_SENSOR): cv.entity_id,
+        vol.Optional(CONF_HUMIDITY_DRY, default=45.0): vol.Coerce(float),
+        vol.Optional(CONF_HUMIDITY_HUMID, default=75.0): vol.Coerce(float),
     }
 )
 
@@ -250,6 +261,14 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         self._load = (
             build_load_controller(config[CONF_LOAD_LIGHT], config[CONF_LOAD_HEAVY])
             if self._load_sensor
+            else None
+        )
+        self._humidity_sensor = config.get(CONF_HUMIDITY_SENSOR)
+        self._humidity = (
+            build_humidity_controller(
+                config[CONF_HUMIDITY_DRY], config[CONF_HUMIDITY_HUMID]
+            )
+            if self._humidity_sensor
             else None
         )
 
@@ -418,13 +437,21 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         # that dilution.
         p_outdoor: float | None = None
         p_load: float | None = None
+        p_humidity: float | None = None
+        indoor_humidity: float | None = None
         if outdoor_drive is not None:
             p_outdoor = self._setpoint.evaluate({"outdoor": outdoor_drive}).value
         if self._load is not None and self._direction == DIRECTION_COOL:
             load_value = self._read_float(self._load_sensor)
             if load_value is not None:
                 p_load = self._load.evaluate({"load": load_value}).value
-        positions = [p for p in (p_outdoor, p_load) if p is not None]
+        if self._humidity is not None and self._direction == DIRECTION_COOL:
+            indoor_humidity = self._read_float(self._humidity_sensor)
+            if indoor_humidity is not None:
+                p_humidity = self._humidity.evaluate(
+                    {"humidity": indoor_humidity}
+                ).value
+        positions = [p for p in (p_outdoor, p_load, p_humidity) if p is not None]
         if positions:
             p = max(positions)
             fuzzy_target = self._comfort_max - p * (
@@ -458,6 +485,10 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             ATTR_OUTDOOR_DRIVE: outdoor_drive,
             ATTR_OUTDOOR_POSITION: round(p_outdoor, 3) if p_outdoor is not None else None,
             ATTR_LOAD_POSITION: round(p_load, 3) if p_load is not None else None,
+            ATTR_HUMIDITY_POSITION: round(p_humidity, 3)
+            if p_humidity is not None
+            else None,
+            ATTR_INDOOR_HUMIDITY: indoor_humidity,
             ATTR_ACTIVE_RULES: [
                 f"{text} ({strength:.2f})" for text, strength in result.top_rules()
             ],

@@ -34,6 +34,7 @@ __all__ = [
     "build_command_controller",
     "build_setpoint_controller",
     "build_load_controller",
+    "build_humidity_controller",
 ]
 
 
@@ -224,4 +225,60 @@ def build_load_controller(
     ]
     return FuzzyController(
         [load], position, rules, resolution=resolution, defuzz="weighted_average"
+    )
+
+
+def build_humidity_controller(
+    humidity_dry: float = 45.0,
+    humidity_humid: float = 75.0,
+    *,
+    resolution: int = 201,
+) -> FuzzyController:
+    """Indoor relative humidity -> position p in [0, 1/3].
+
+    Thermal comfort is a feels-like judgment, not a dry-bulb number: the same
+    room temperature reads comfortable at 45% RH and clammy at 75%. This
+    channel biases the setpoint downward as the air gets muggier, which both
+    compensates the perception and puts the compressor to work as a
+    dehumidifier — cooling lower on humid days does double duty.
+
+    Deliberately capped at ONE THIRD of the range: humidity shifts how a
+    temperature feels by roughly a degree on a typical comfort band, it is not
+    a heat source. The weather channel keeps sole ownership of the top of the
+    range and the load channel of the middle; all three fuse as max() in the
+    entity. Indoor RH is the right input — it already integrates outdoor
+    humidity, infiltration and the equipment's own drying.
+    """
+    if not humidity_dry < humidity_humid:
+        raise ValueError("humidity_dry must be < humidity_humid")
+    span = humidity_humid - humidity_dry
+    mid = humidity_dry + span / 2.0
+    pad = span * 0.25
+    lo, hi = humidity_dry - pad, humidity_humid + pad
+
+    humidity = Variable(
+        "humidity",
+        (lo, hi),
+        {
+            "dry": Trapezoidal(lo, lo, humidity_dry, mid),
+            "pleasant": Triangular(humidity_dry, mid, humidity_humid),
+            "muggy": Trapezoidal(mid, humidity_humid, hi, hi),
+        },
+    )
+    position = Variable(
+        "position",
+        (0.0, 1.0),
+        {
+            "none": Triangular(0.0, 0.0, 1.0 / 6.0),
+            "slight": Triangular(0.0, 1.0 / 6.0, 1.0 / 3.0),
+            "firm": Triangular(1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0),
+        },
+    )
+    rules = [
+        Rule((("humidity", "dry"),), "none"),
+        Rule((("humidity", "pleasant"),), "slight"),
+        Rule((("humidity", "muggy"),), "firm"),
+    ]
+    return FuzzyController(
+        [humidity], position, rules, resolution=resolution, defuzz="weighted_average"
     )

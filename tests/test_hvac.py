@@ -254,3 +254,27 @@ class TestLoadController:
             load.evaluate({"load": 200}).value,
         )
         assert mild_compute == pytest.approx(2 / 3, abs=1e-6)  # load carries it
+
+
+class TestHumidityController:
+    def test_caps_at_one_third(self):
+        from custom_components.fuzzy_thermostat.fuzzy.hvac import (
+            build_humidity_controller,
+        )
+        h = build_humidity_controller()  # defaults 45/75 %RH
+        assert h.evaluate({"humidity": 30}).value == pytest.approx(0.0)
+        assert h.evaluate({"humidity": 45}).value == pytest.approx(0.0)
+        assert h.evaluate({"humidity": 75}).value == pytest.approx(1 / 3, abs=1e-6)
+        assert h.evaluate({"humidity": 95}).value == pytest.approx(1 / 3, abs=1e-6)
+
+    def test_monotone_and_bounded(self):
+        from custom_components.fuzzy_thermostat.fuzzy.hvac import (
+            build_humidity_controller,
+        )
+        h = build_humidity_controller()
+        prev = -1.0
+        for rh in range(20, 101):
+            p = h.evaluate({"humidity": rh}).value
+            assert -1e-9 <= p <= 1 / 3 + 1e-9
+            assert p >= prev - 1e-9
+            prev = p
