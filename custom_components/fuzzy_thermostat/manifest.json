@@ -1,7 +1,9 @@
 {
   "domain": "fuzzy_thermostat",
   "name": "Fuzzy Thermostat",
-  "codeowners": [],
+  "codeowners": [
+    "@Lcstyle"
+  ],
   "dependencies": [],
   "documentation": "https://github.com/Lcstyle/ha-fuzzy-thermostat",
   "integration_type": "helper",
