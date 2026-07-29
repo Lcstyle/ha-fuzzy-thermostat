@@ -119,7 +119,7 @@ climate:
 | `margin_wide` / `margin_narrow` | 2.5/1.0 °F, 1.4/0.6 °C | start-conditioning margin at mild/torrid |
 | `sample_interval` | 5 min | evaluation cadence |
 | `max_slew` | 0.5 °F, 0.3 °C | max target movement per sample |
-| `demand_on` / `demand_off` | 0.35 / 0.15 | demand hysteresis |
+| `demand_on` / `demand_off` | 0.10 / 0.03 | demand hysteresis (margin is the binding start gate) |
 | `min_cycle_duration` | 10 min | compressor/switch protection |
 | `trend_window` | 20 min | slope window for the trend input |
 | `manage_power` | `true` | supervisor may switch the device on/off |

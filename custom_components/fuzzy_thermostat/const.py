@@ -39,8 +39,12 @@ ATTR_OUTDOOR_DRIVE = "outdoor_drive"
 
 # Defaults that do not depend on the unit system.
 DEFAULT_SAMPLE_INTERVAL_S = 300
-DEFAULT_DEMAND_ON = 0.35
-DEFAULT_DEMAND_OFF = 0.15
+# The margin (target + margin) is the intended binding start gate; demand only
+# contributes direction and trend damping. At 0.35 on a wide temperature
+# universe the demand gate accidentally out-ranked the margin and would hold
+# off until ~10 degrees past target. Found in the first real deployment.
+DEFAULT_DEMAND_ON = 0.10
+DEFAULT_DEMAND_OFF = 0.03
 DEFAULT_MIN_CYCLE_S = 600
 DEFAULT_TREND_WINDOW_S = 1200
 
