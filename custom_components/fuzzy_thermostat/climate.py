@@ -80,6 +80,7 @@ from .const import (
     ATTR_TREND,
     CONF_CLIMATE_ENTITY,
     CONF_COMFORT_MAX,
+    CONF_COMPANION_ENTITIES,
     CONF_CONTROL_STYLE,
     CONF_COMFORT_MIN,
     CONF_COOLER,
@@ -173,6 +174,13 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_CONTROL_STYLE, default=STYLE_SETPOINT): vol.In(
             [STYLE_SETPOINT, STYLE_CYCLING]
         ),
+        # Companion actuators (circulation fans, dampers) that follow the
+        # conditioning state: turned on when it becomes active, off when it
+        # stops. STATEFUL entities only — an RF toggle has no readable state
+        # and will drift out of phase; wrap it or leave it out. For richer
+        # policies (presence gating, off-delays) trigger an automation on this
+        # entity's hvac_action instead — that attribute is the loose hook.
+        vol.Optional(CONF_COMPANION_ENTITIES): cv.entity_ids,
         # Load compensation: all three or none. The sensor is any numeric proxy
         # for internal dissipation (CPU package temp, plug wattage, rack temp);
         # the breakpoints carry its units.
@@ -234,6 +242,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         self._forecast_high = config.get(CONF_FORECAST_HIGH_SENSOR)
         self._manage_power = config[CONF_MANAGE_POWER]
         self._style = config[CONF_CONTROL_STYLE]
+        self._companions: list[str] = config.get(CONF_COMPANION_ENTITIES) or []
 
         # Direction: a heater switch always heats, a cooler always cools; the
         # wrapped-climate form takes it from `direction`.
@@ -619,6 +628,16 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         self._extra[ATTR_CONTROL_REASON] = (
             f"{'started' if on else 'stopped'}: {reason}"
         )
+        # Companions ride the same edge, through the same choke point, so
+        # every style (setpoint enable/disable, cycling gates, switch mode)
+        # carries them for free.
+        if self._companions:
+            await self.hass.services.async_call(
+                "homeassistant",
+                SERVICE_TURN_ON if on else SERVICE_TURN_OFF,
+                {ATTR_ENTITY_ID: self._companions},
+                blocking=False,
+            )
 
     async def _async_send_setpoint(self) -> None:
         """Supervisor mode: govern the wrapped device's setpoint, gently."""

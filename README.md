@@ -150,6 +150,7 @@ climate:
 | `trend_window` | 20 min | slope window for the trend input |
 | `manage_power` | `true` | supervisor may switch the device on/off |
 | `control_style` | `setpoint` | supervisor style: govern the setpoint, or `cycling` |
+| `companion_entities` | — | stateful fans/dampers switched with the conditioning |
 | `load_sensor` | — | internal-load proxy (enables load compensation) |
 | `load_light` / `load_heavy` | — | sensor values meaning "idle" / "flat out" |
 | `humidity_sensor` | — | indoor RH sensor (enables humidity compensation) |
