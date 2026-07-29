@@ -303,7 +303,10 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         self._attr_hvac_mode = hvac_mode
         if hvac_mode == HVACMode.OFF:
-            await self._async_actuate(False, reason="turned off")
+            # force: an explicit OFF must not be swallowed by the minimum-cycle
+            # guard — nothing would ever retry it, and the equipment would keep
+            # running while this entity reported off.
+            await self._async_actuate(False, reason="turned off", force=True)
         await self._async_control()
 
     # -- sampling ----------------------------------------------------------
@@ -447,11 +450,11 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             and now - self._last_switch < self._min_cycle
         )
 
-    async def _async_actuate(self, on: bool, *, reason: str) -> None:
+    async def _async_actuate(self, on: bool, *, reason: str, force: bool = False) -> None:
         now = dt_util.utcnow()
         if on == self._actuator_on:
             return
-        if self._cycle_blocked(now):
+        if not force and self._cycle_blocked(now):
             self._extra[ATTR_CONTROL_REASON] = (
                 f"held: minimum cycle time ({reason})"
             )
