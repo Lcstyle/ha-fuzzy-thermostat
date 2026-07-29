@@ -223,9 +223,9 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         self._attr_max_temp = self._comfort_max
 
         # Trend universe: |3 F/h| (|1.7 C/h|) counts as clearly moving.
-        trend_limit = 3.0 if us else 1.7
+        self._trend_limit = 3.0 if us else 1.7
         self._command = build_command_controller(
-            t_min, t_max, trend_limit=trend_limit
+            t_min, t_max, trend_limit=self._trend_limit
         )
         self._setpoint = build_setpoint_controller(
             config.get(CONF_OUTDOOR_MILD, unit_default("outdoor_mild")),
@@ -431,22 +431,31 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             self.async_write_ha_state()
             return
 
-        # Demand is heat-positive. Actuation compares against the direction.
-        if self._direction == DIRECTION_HEAT:
-            want_on = demand >= self._demand_on
-            want_off = demand <= self._demand_off
-        else:
-            want_on = demand <= -self._demand_on
-            want_off = demand >= -self._demand_off
-        # The margin widens the pull-in point: do not start conditioning until
-        # the room has drifted past target by the (outdoor-shrunk) margin.
+        # START gate: the margin IS the policy — "no more than `margin` past
+        # target" — plus a trend guard so we do not start into a room already
+        # falling fast (post-cooling coast). Fuzzy demand is deliberately NOT a
+        # start gate: with explicit hold rules the aggregate is hold-dominated
+        # near target, so demand sits at ~0 even well past the margin. The
+        # first live deployment idled at room 73 / target 71 because demand
+        # (-0.006) was allowed to out-vote a margin the room had already
+        # crossed by a full degree.
+        #
+        # STOP gate: that near-target flatness is exactly what makes demand the
+        # right OFF signal — advocacy gone means the room is back at target.
+        settle = self._trend_limit / 3.0  # "clearly moving the right way"
         past_margin = (
             room - self._effective_target >= margin
             if self._direction == DIRECTION_COOL
             else self._effective_target - room >= margin
         )
+        if self._direction == DIRECTION_HEAT:
+            want_on = past_margin and trend < settle
+            want_off = demand <= self._demand_off
+        else:
+            want_on = past_margin and trend > -settle
+            want_off = demand >= -self._demand_off
 
-        if not self._actuator_on and want_on and past_margin:
+        if not self._actuator_on and want_on:
             await self._async_actuate(True, reason=f"demand {demand:+.2f}")
         elif self._actuator_on and want_off:
             await self._async_actuate(False, reason=f"demand {demand:+.2f}")
