@@ -25,6 +25,9 @@ CONF_TREND_WINDOW = "trend_window"
 CONF_MIN_TEMP = "min_temp"
 CONF_MAX_TEMP = "max_temp"
 CONF_MANAGE_POWER = "manage_power"
+CONF_LOAD_SENSOR = "load_sensor"
+CONF_LOAD_LIGHT = "load_light"
+CONF_LOAD_HEAVY = "load_heavy"
 
 DIRECTION_COOL = "cool"
 DIRECTION_HEAT = "heat"
@@ -36,6 +39,8 @@ ATTR_TREND = "temperature_trend"
 ATTR_ACTIVE_RULES = "active_rules"
 ATTR_CONTROL_REASON = "control_reason"
 ATTR_OUTDOOR_DRIVE = "outdoor_drive"
+ATTR_OUTDOOR_POSITION = "outdoor_position"
+ATTR_LOAD_POSITION = "load_position"
 
 # Defaults that do not depend on the unit system.
 DEFAULT_SAMPLE_INTERVAL_S = 300

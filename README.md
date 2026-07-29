@@ -72,6 +72,16 @@ of positions in [0, 1] cannot leave [0, 1]), not a clamp bolted on afterwards.
 **Switch mode** — the `generic_thermostat` analogue: drives a `heater:` or
 `cooler:` switch, with a minimum cycle time.
 
+**Load compensation** — optional, for rooms whose dominant heat source is
+*inside*: equipment corners, home offices full of computers, server closets.
+Any numeric proxy for internal dissipation (a CPU package temperature, a
+smart-plug wattage, a rack sensor) maps to its own position, and the two
+drivers fuse as **max(outdoor, load)** — heat sources add, so the setpoint is
+as aggressive as the strongest driver demands, and a light load can never
+relax what a hot day already requires. The load channel deliberately tops out
+at two-thirds of the range: a flat-out computer in a mild week should not
+command the same setpoint floor as a heatwave.
+
 **Supervisor mode** — for equipment that already runs its own compressor
 logic (mini-splits, smart heat pumps): the fuzzy layer governs the device's
 *setpoint* (rate-limited so the unit is not chattered) and, optionally, when
@@ -123,6 +133,8 @@ climate:
 | `min_cycle_duration` | 10 min | compressor/switch protection |
 | `trend_window` | 20 min | slope window for the trend input |
 | `manage_power` | `true` | supervisor may switch the device on/off |
+| `load_sensor` | — | internal-load proxy (enables load compensation) |
+| `load_light` / `load_heavy` | — | sensor values meaning "idle" / "flat out" |
 | `min_temp` / `max_temp` | 45/95 °F, 7/35 °C | universe bounds for the linguistic terms |
 
 ## Observability
@@ -158,7 +170,7 @@ unreadable room is never treated as a comfortable one.
 ## Tests
 
 ```
-python3 -m pytest tests/    # 45 tests, pure python, no HA install needed
+python3 -m pytest tests/    # 49 tests, pure python, no HA install needed
 ```
 
 The suite covers membership geometry, the inference pipeline, the published

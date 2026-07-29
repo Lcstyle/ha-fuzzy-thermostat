@@ -30,7 +30,11 @@ from __future__ import annotations
 from .engine import FuzzyController, Rule, Variable
 from .membership import Trapezoidal, Triangular
 
-__all__ = ["build_command_controller", "build_setpoint_controller"]
+__all__ = [
+    "build_command_controller",
+    "build_setpoint_controller",
+    "build_load_controller",
+]
 
 
 def build_command_controller(
@@ -155,4 +159,69 @@ def build_setpoint_controller(
     ]
     return FuzzyController(
         [outdoor], position, rules, resolution=resolution, defuzz="weighted_average"
+    )
+
+
+def build_load_controller(
+    load_light: float,
+    load_heavy: float,
+    *,
+    resolution: int = 201,
+) -> FuzzyController:
+    """Internal-load proxy -> position p in [0, 1], like the outdoor controller.
+
+    Rooms whose dominant heat source is INSIDE — equipment closets, home
+    offices full of computers, server corners — break the outdoor-compensation
+    assumption: "mild outside" does not mean "low cooling need" when several
+    hundred watts dissipate into the space regardless of the weather. This is
+    the load-compensation half of that story: any numeric proxy for internal
+    dissipation (a CPU package temperature, a smart-plug wattage, a rack
+    sensor) maps to a position that pulls the setpoint toward its aggressive
+    bound as the load grows.
+
+    ``load_light`` is the sensor value at or below which the load contributes
+    nothing; ``load_heavy`` the value at or above which it demands the most.
+    Units are whatever the sensor reports — the breakpoints carry them.
+
+    The caller fuses this with the outdoor position as ``max(p_outdoor,
+    p_load)``: heat sources add, so the setpoint is as aggressive as the
+    strongest driver demands — but a light load must never *relax* what a hot
+    day already requires, which is why the fusion is max and not a mean.
+
+    Peaks are 0 / 1/3 / 2/3 rather than reaching 1.0: even a flat-out load in
+    a mild week should not command the same setpoint floor as a heatwave —
+    the outdoor channel keeps sole ownership of the last third of the range.
+    """
+    if not load_light < load_heavy:
+        raise ValueError("load_light must be < load_heavy")
+    span = load_heavy - load_light
+    mid = load_light + span / 2.0
+    pad = span * 0.25
+    lo, hi = load_light - pad, load_heavy + pad
+
+    load = Variable(
+        "load",
+        (lo, hi),
+        {
+            "light": Trapezoidal(lo, lo, load_light, mid),
+            "moderate": Triangular(load_light, mid, load_heavy),
+            "heavy": Trapezoidal(mid, load_heavy, hi, hi),
+        },
+    )
+    position = Variable(
+        "position",
+        (0.0, 1.0),
+        {
+            "relaxed": Triangular(0.0, 0.0, 1.0 / 3.0),
+            "easy": Triangular(0.0, 1.0 / 3.0, 2.0 / 3.0),
+            "firm": Triangular(1.0 / 3.0, 2.0 / 3.0, 1.0),
+        },
+    )
+    rules = [
+        Rule((("load", "light"),), "relaxed"),
+        Rule((("load", "moderate"),), "easy"),
+        Rule((("load", "heavy"),), "firm"),
+    ]
+    return FuzzyController(
+        [load], position, rules, resolution=resolution, defuzz="weighted_average"
     )

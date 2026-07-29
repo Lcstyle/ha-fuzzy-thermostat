@@ -23,6 +23,7 @@ from custom_components.fuzzy_thermostat.fuzzy.engine import (
 )
 from custom_components.fuzzy_thermostat.fuzzy.hvac import (
     build_command_controller,
+    build_load_controller,
     build_setpoint_controller,
 )
 from custom_components.fuzzy_thermostat.fuzzy.membership import Triangular
@@ -207,3 +208,49 @@ class TestSetpointController:
             p = setpoint.evaluate({"outdoor": outdoor}).value
             target = hi - p * (hi - lo)
             assert lo - 1e-9 <= target <= hi + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Load (internal gain) controller
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def load() -> FuzzyController:
+    # e.g. a CPU package temperature: quiet desktop ~115, flat-out compute ~190
+    return build_load_controller(115, 190)
+
+
+class TestLoadController:
+    def test_light_load_contributes_nothing(self, load):
+        assert load.evaluate({"load": 100}).value == pytest.approx(0.0)
+        assert load.evaluate({"load": 115}).value == pytest.approx(0.0)
+
+    def test_heavy_load_caps_at_two_thirds(self, load):
+        """Deliberate: even a flat-out load in a mild week must not command the
+        heatwave setpoint floor — the outdoor channel owns the last third."""
+        assert load.evaluate({"load": 190}).value == pytest.approx(2 / 3, abs=1e-6)
+        assert load.evaluate({"load": 250}).value == pytest.approx(2 / 3, abs=1e-6)
+
+    def test_monotone_and_bounded(self, load):
+        prev = -1.0
+        for v in range(90, 261, 2):
+            p = load.evaluate({"load": v}).value
+            assert p is not None and -1e-9 <= p <= 2 / 3 + 1e-9
+            assert p >= prev - 1e-9
+            prev = p
+
+    def test_max_fusion_semantics(self, load):
+        """Heat sources add: the strongest driver wins, and a light load never
+        relaxes what a torrid day demands (nor vice versa)."""
+        outdoor = build_setpoint_controller(72, 92)
+        torrid_idle = max(
+            outdoor.evaluate({"outdoor": 95}).value,
+            load.evaluate({"load": 100}).value,
+        )
+        assert torrid_idle == pytest.approx(1.0)  # weather unchallenged
+        mild_compute = max(
+            outdoor.evaluate({"outdoor": 65}).value,
+            load.evaluate({"load": 200}).value,
+        )
+        assert mild_compute == pytest.approx(2 / 3, abs=1e-6)  # load carries it

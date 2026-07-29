@@ -72,7 +72,9 @@ from .const import (
     ATTR_CONTROL_REASON,
     ATTR_FUZZY_DEMAND,
     ATTR_FUZZY_TARGET,
+    ATTR_LOAD_POSITION,
     ATTR_OUTDOOR_DRIVE,
+    ATTR_OUTDOOR_POSITION,
     ATTR_TREND,
     CONF_CLIMATE_ENTITY,
     CONF_COMFORT_MAX,
@@ -83,6 +85,9 @@ from .const import (
     CONF_DIRECTION,
     CONF_FORECAST_HIGH_SENSOR,
     CONF_HEATER,
+    CONF_LOAD_HEAVY,
+    CONF_LOAD_LIGHT,
+    CONF_LOAD_SENSOR,
     CONF_MANAGE_POWER,
     CONF_MARGIN_NARROW,
     CONF_MARGIN_WIDE,
@@ -105,7 +110,11 @@ from .const import (
     DIRECTION_COOL,
     DIRECTION_HEAT,
 )
-from .fuzzy import build_command_controller, build_setpoint_controller
+from .fuzzy import (
+    build_command_controller,
+    build_load_controller,
+    build_setpoint_controller,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -145,6 +154,12 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
             CONF_TREND_WINDOW, default=timedelta(seconds=DEFAULT_TREND_WINDOW_S)
         ): cv.positive_time_period,
         vol.Optional(CONF_MANAGE_POWER, default=True): cv.boolean,
+        # Load compensation: all three or none. The sensor is any numeric proxy
+        # for internal dissipation (CPU package temp, plug wattage, rack temp);
+        # the breakpoints carry its units.
+        vol.Inclusive(CONF_LOAD_SENSOR, "load"): cv.entity_id,
+        vol.Inclusive(CONF_LOAD_LIGHT, "load"): vol.Coerce(float),
+        vol.Inclusive(CONF_LOAD_HEAVY, "load"): vol.Coerce(float),
     }
 )
 
@@ -230,6 +245,12 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         self._setpoint = build_setpoint_controller(
             config.get(CONF_OUTDOOR_MILD, unit_default("outdoor_mild")),
             config.get(CONF_OUTDOOR_TORRID, unit_default("outdoor_torrid")),
+        )
+        self._load_sensor = config.get(CONF_LOAD_SENSOR)
+        self._load = (
+            build_load_controller(config[CONF_LOAD_LIGHT], config[CONF_LOAD_HEAVY])
+            if self._load_sensor
+            else None
         )
 
         mode = HVACMode.HEAT if self._direction == DIRECTION_HEAT else HVACMode.COOL
@@ -389,8 +410,23 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
                 # Anticipate the afternoon instead of chasing it.
                 outdoor_drive = max(readings)
 
+        # Two independent drivers can push the setpoint toward its aggressive
+        # bound: the weather, and the room's own internal load. They FUSE AS
+        # MAX — heat sources add, so the setpoint is as aggressive as the
+        # strongest driver demands, but a light load must never relax what a
+        # hot day already requires (and vice versa). A mean would do exactly
+        # that dilution.
+        p_outdoor: float | None = None
+        p_load: float | None = None
         if outdoor_drive is not None:
-            p = self._setpoint.evaluate({"outdoor": outdoor_drive}).value or 0.0
+            p_outdoor = self._setpoint.evaluate({"outdoor": outdoor_drive}).value
+        if self._load is not None and self._direction == DIRECTION_COOL:
+            load_value = self._read_float(self._load_sensor)
+            if load_value is not None:
+                p_load = self._load.evaluate({"load": load_value}).value
+        positions = [p for p in (p_outdoor, p_load) if p is not None]
+        if positions:
+            p = max(positions)
             fuzzy_target = self._comfort_max - p * (
                 self._comfort_max - self._comfort_min
             )
@@ -420,6 +456,8 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             ATTR_ACTIVATION_MARGIN: round(margin, 2),
             ATTR_TREND: round(trend, 2),
             ATTR_OUTDOOR_DRIVE: outdoor_drive,
+            ATTR_OUTDOOR_POSITION: round(p_outdoor, 3) if p_outdoor is not None else None,
+            ATTR_LOAD_POSITION: round(p_load, 3) if p_load is not None else None,
             ATTR_ACTIVE_RULES: [
                 f"{text} ({strength:.2f})" for text, strength in result.top_rules()
             ],
