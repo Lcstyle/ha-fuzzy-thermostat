@@ -38,6 +38,11 @@ chapter's HVAC demonstration (Demo 5-3, Tables 5-4 to 5-8) to the printed
 precision** — the discrete-sum centroid most tutorials implement does not; you
 need the true geometric centroid of the clipped piecewise-linear aggregate.
 
+A full cross-reference — which idea in the chapter became which piece of this
+code, where the implementation is faithful, where it deliberately departs, and
+the errata found while reproducing the published tables — is in
+[docs/NORRIS-CH5.md](docs/NORRIS-CH5.md).
+
 Two controllers are built on the engine:
 
 **When to run** — room and target temperature are separate linguistic
