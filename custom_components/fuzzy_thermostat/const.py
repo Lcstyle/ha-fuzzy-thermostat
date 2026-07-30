@@ -36,6 +36,7 @@ CONF_LOAD_SMOOTHING = "load_smoothing"
 CONF_HUMIDITY_SENSOR = "humidity_sensor"
 CONF_HUMIDITY_DRY = "humidity_dry"
 CONF_HUMIDITY_HUMID = "humidity_humid"
+CONF_FEEDBACK_ENTITY = "feedback_entity"
 
 DIRECTION_COOL = "cool"
 DIRECTION_HEAT = "heat"
@@ -53,6 +54,7 @@ ATTR_LOAD_SMOOTHED = "load_smoothed"
 ATTR_HELD_SETPOINT = "held_setpoint"
 ATTR_HUMIDITY_POSITION = "humidity_position"
 ATTR_INDOOR_HUMIDITY = "indoor_humidity"
+ATTR_FEEDBACK_BIAS = "feedback_bias"
 
 # Defaults that do not depend on the unit system.
 DEFAULT_SAMPLE_INTERVAL_S = 300

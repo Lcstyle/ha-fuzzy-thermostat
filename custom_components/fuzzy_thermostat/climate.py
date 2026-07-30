@@ -75,6 +75,7 @@ from .const import (
     ATTR_FUZZY_TARGET,
     ATTR_HUMIDITY_POSITION,
     ATTR_INDOOR_HUMIDITY,
+    ATTR_FEEDBACK_BIAS,
     ATTR_LOAD_POSITION,
     ATTR_LOAD_SMOOTHED,
     ATTR_HELD_SETPOINT,
@@ -94,6 +95,7 @@ from .const import (
     CONF_HEATER,
     CONF_HUMIDITY_DRY,
     CONF_HUMIDITY_HUMID,
+    CONF_FEEDBACK_ENTITY,
     CONF_HUMIDITY_SENSOR,
     CONF_LOAD_HEAVY,
     CONF_LOAD_LIGHT,
@@ -199,6 +201,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         # Humidity compensation: RH% is universal, so the breakpoints have
         # safe defaults and only the sensor is needed to enable it.
         vol.Optional(CONF_HUMIDITY_SENSOR): cv.entity_id,
+        vol.Optional(CONF_FEEDBACK_ENTITY): cv.entity_id,
         vol.Optional(CONF_HUMIDITY_DRY, default=45.0): vol.Coerce(float),
         vol.Optional(CONF_HUMIDITY_HUMID, default=75.0): vol.Coerce(float),
     }
@@ -290,6 +293,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             config.get(CONF_OUTDOOR_MILD, unit_default("outdoor_mild")),
             config.get(CONF_OUTDOOR_TORRID, unit_default("outdoor_torrid")),
         )
+        self._feedback = config.get(CONF_FEEDBACK_ENTITY)
         self._load_sensor = config.get(CONF_LOAD_SENSOR)
         self._load_tau = config[CONF_LOAD_SMOOTHING].total_seconds()
         self._load_ema: float | None = None
@@ -505,6 +509,17 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             fuzzy_target = self._clamp_comfort(self._attr_target_temperature)
             margin = self._margin_wide
 
+        # HUMAN FEEDBACK: comfort is ultimately subjective, and no sensor
+        # measures the occupant. feedback_entity (any input_number, in degrees)
+        # biases the fused target directly - "I'm feeling warm" nudges it down
+        # a degree. Clamped twice so a runaway helper cannot overdo it: the
+        # bias itself to +-2, and the result to the structural comfort bounds.
+        bias = 0.0
+        if self._feedback:
+            raw_bias = self._read_float(self._feedback)
+            if raw_bias is not None:
+                bias = max(-2.0, min(2.0, raw_bias))
+                fuzzy_target += bias
         fuzzy_target = self._clamp_comfort(fuzzy_target)  # structural, twice over
 
         # Rate-limit how fast the effective target may move (no chattering).
@@ -536,6 +551,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             if p_humidity is not None
             else None,
             ATTR_INDOOR_HUMIDITY: indoor_humidity,
+            ATTR_FEEDBACK_BIAS: bias,
             ATTR_ACTIVE_RULES: [
                 f"{text} ({strength:.2f})" for text, strength in result.top_rules()
             ],

@@ -155,6 +155,7 @@ climate:
 | `load_light` / `load_heavy` | — | sensor values meaning "idle" / "flat out" |
 | `load_smoothing` | duration | `"00:15:00"` | EMA time constant applied to the load sensor before fuzzification. The room integrates heat over tens of minutes; fast proxies (CPU temps, power meters) must not alias their flicker into the setpoint. `0` disables. |
 | `humidity_sensor` | — | indoor RH sensor (enables humidity compensation) |
+| `feedback_entity` | entity id | — | An `input_number` holding a subjective comfort bias in degrees. Wire it to voice ("I'm feeling warm" → decrement) and the occupant becomes a first-class input: the bias shifts the fused target directly, clamped to ±2° and to the comfort bounds. Pair with a decay automation so a feeling expressed at noon doesn't still govern at midnight. |
 | `humidity_dry` / `humidity_humid` | 45 / 75 %RH | breakpoints for the humidity channel |
 | `min_temp` / `max_temp` | 45/95 °F, 7/35 °C | universe bounds for the linguistic terms |
 
