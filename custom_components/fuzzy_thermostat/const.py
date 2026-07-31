@@ -37,6 +37,8 @@ CONF_HUMIDITY_SENSOR = "humidity_sensor"
 CONF_HUMIDITY_DRY = "humidity_dry"
 CONF_HUMIDITY_HUMID = "humidity_humid"
 CONF_FEEDBACK_ENTITY = "feedback_entity"
+CONF_TRACKING_GAIN = "tracking_gain"
+CONF_TRACKING_MAX = "tracking_max"
 
 DIRECTION_COOL = "cool"
 DIRECTION_HEAT = "heat"
@@ -55,6 +57,7 @@ ATTR_HELD_SETPOINT = "held_setpoint"
 ATTR_HUMIDITY_POSITION = "humidity_position"
 ATTR_INDOOR_HUMIDITY = "indoor_humidity"
 ATTR_FEEDBACK_BIAS = "feedback_bias"
+ATTR_TRACKING_TRIM = "tracking_trim"
 
 # Defaults that do not depend on the unit system.
 DEFAULT_SAMPLE_INTERVAL_S = 300

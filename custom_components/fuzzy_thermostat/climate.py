@@ -76,6 +76,7 @@ from .const import (
     ATTR_HUMIDITY_POSITION,
     ATTR_INDOOR_HUMIDITY,
     ATTR_FEEDBACK_BIAS,
+    ATTR_TRACKING_TRIM,
     ATTR_LOAD_POSITION,
     ATTR_LOAD_SMOOTHED,
     ATTR_HELD_SETPOINT,
@@ -96,6 +97,8 @@ from .const import (
     CONF_HUMIDITY_DRY,
     CONF_HUMIDITY_HUMID,
     CONF_FEEDBACK_ENTITY,
+    CONF_TRACKING_GAIN,
+    CONF_TRACKING_MAX,
     CONF_HUMIDITY_SENSOR,
     CONF_LOAD_HEAVY,
     CONF_LOAD_LIGHT,
@@ -202,6 +205,8 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         # safe defaults and only the sensor is needed to enable it.
         vol.Optional(CONF_HUMIDITY_SENSOR): cv.entity_id,
         vol.Optional(CONF_FEEDBACK_ENTITY): cv.entity_id,
+        vol.Optional(CONF_TRACKING_GAIN, default=0.0): vol.Coerce(float),
+        vol.Optional(CONF_TRACKING_MAX, default=3.0): vol.Coerce(float),
         vol.Optional(CONF_HUMIDITY_DRY, default=45.0): vol.Coerce(float),
         vol.Optional(CONF_HUMIDITY_HUMID, default=75.0): vol.Coerce(float),
     }
@@ -294,6 +299,8 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             config.get(CONF_OUTDOOR_TORRID, unit_default("outdoor_torrid")),
         )
         self._feedback = config.get(CONF_FEEDBACK_ENTITY)
+        self._tracking_gain = config[CONF_TRACKING_GAIN]
+        self._tracking_max = config[CONF_TRACKING_MAX]
         self._load_sensor = config.get(CONF_LOAD_SENSOR)
         self._load_tau = config[CONF_LOAD_SMOOTHING].total_seconds()
         self._load_ema: float | None = None
@@ -735,6 +742,22 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             return
         step = wstate.attributes.get("target_temp_step") or 0.5
         raw = self._effective_target
+        # REMOTE-ROOM TRACKING: when the wrapped device senses a DIFFERENT room
+        # than target_sensor (a hallway thermostat governed for a bedroom), the
+        # fuzzy target alone lands the wrong temperature at the sensor that
+        # matters. Trim the sent setpoint by the tracked room's error - room
+        # running warm pushes the wrapped setpoint below target, cold above,
+        # identically in both directions. tracking_max caps how far one room
+        # may impose on a shared zone. Gain 0 (default) disables: a device
+        # sensing its own room needs no trim.
+        trim = 0.0
+        if self._tracking_gain > 0 and self._samples:
+            room_now = self._samples[-1][1]
+            trim = self._tracking_gain * (room_now - raw)
+            trim = max(-self._tracking_max, min(self._tracking_max, trim))
+            raw = raw - trim
+            raw = max(self._attr_min_temp, min(self._attr_max_temp, raw))
+        self._extra[ATTR_TRACKING_TRIM] = round(trim, 2)
         held = wstate.attributes.get(ATTR_TEMPERATURE)
         if held is not None:
             held = float(held)
