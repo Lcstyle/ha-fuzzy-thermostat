@@ -756,7 +756,16 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             trim = self._tracking_gain * (room_now - raw)
             trim = max(-self._tracking_max, min(self._tracking_max, trim))
             raw = raw - trim
-            raw = max(self._attr_min_temp, min(self._attr_max_temp, raw))
+            # Bound by the DEVICE's supported range, not the room's comfort
+            # band - the trim exists precisely to push a shared thermostat
+            # beyond the tracked room's band. tracking_max already caps the
+            # excursion; this only guards against commanding the impossible.
+            dev_min = wstate.attributes.get("min_temp")
+            dev_max = wstate.attributes.get("max_temp")
+            if dev_min is not None:
+                raw = max(float(dev_min), raw)
+            if dev_max is not None:
+                raw = min(float(dev_max), raw)
         self._extra[ATTR_TRACKING_TRIM] = round(trim, 2)
         held = wstate.attributes.get(ATTR_TEMPERATURE)
         if held is not None:
