@@ -138,6 +138,11 @@ from .fuzzy import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# How far the occupant's feedback helper may move the target, in degrees.
+# Referenced twice - once to widen the entity's advertised limits, once to
+# clamp the helper itself - so the two can never disagree.
+FEEDBACK_BIAS_LIMIT = 2.0
+
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
         vol.Required(CONF_NAME): cv.string,
@@ -286,8 +291,14 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
 
         t_min = config.get(CONF_MIN_TEMP, unit_default("min_temp"))
         t_max = config.get(CONF_MAX_TEMP, unit_default("max_temp"))
-        self._attr_min_temp = self._comfort_min
-        self._attr_max_temp = self._comfort_max
+        # The comfort band bounds what the fuzzy RULES may ask for. An
+        # occupant feedback helper is applied on top of that band (see below),
+        # so the entity's own limits must leave room for it - otherwise
+        # target_temperature would report a value outside its own min/max the
+        # moment someone says they feel cold.
+        bias_room = FEEDBACK_BIAS_LIMIT if config.get(CONF_FEEDBACK_ENTITY) else 0.0
+        self._attr_min_temp = self._comfort_min - bias_room
+        self._attr_max_temp = self._comfort_max + bias_room
 
         # Trend universe: |3 F/h| (|1.7 C/h|) counts as clearly moving.
         self._trend_limit = 3.0 if us else 1.7
@@ -347,6 +358,20 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
                 self.hass, [self._sensor], self._sensor_changed
             )
         )
+        if self._feedback:
+            # Occupant feedback is the one input with a person waiting on the
+            # other end of it, so it re-evaluates immediately instead of
+            # waiting for the next sample. Everything else here is
+            # environmental and can wait: a degree of weather is not urgent,
+            # but someone who just said they feel cold should not sit through
+            # a whole sample_interval (5 min by default) before anything
+            # moves - and on a thermally stable room nothing else would wake
+            # the loop in the meantime.
+            self._unsub.append(
+                async_track_state_change_event(
+                    self.hass, [self._feedback], self._feedback_changed
+                )
+            )
         self._unsub.append(
             async_track_time_interval(
                 self.hass, self._async_sample, self._sample_interval
@@ -407,6 +432,9 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
     @callback
     def _sensor_changed(self, _event: Any) -> None:
         self.async_write_ha_state()
+
+    async def _feedback_changed(self, _event: Any) -> None:
+        await self._async_control()
 
     async def _async_sample(self, _now: datetime) -> None:
         await self._async_control()
@@ -516,18 +544,31 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             fuzzy_target = self._clamp_comfort(self._attr_target_temperature)
             margin = self._margin_wide
 
+        # The comfort band is the STRUCTURAL bound on what the fuzzy rules may
+        # ask for, so clamp the rules' output here, before the occupant has a
+        # say.
+        fuzzy_target = self._clamp_comfort(fuzzy_target)
+
         # HUMAN FEEDBACK: comfort is ultimately subjective, and no sensor
         # measures the occupant. feedback_entity (any input_number, in degrees)
         # biases the fused target directly - "I'm feeling warm" nudges it down
-        # a degree. Clamped twice so a runaway helper cannot overdo it: the
-        # bias itself to +-2, and the result to the structural comfort bounds.
+        # a degree.
+        #
+        # Applied AFTER the comfort clamp, deliberately. The bias exists
+        # precisely because the band is wrong for this person right now, so
+        # clamping it back into the band made it saturate at the edge and do
+        # nothing: with a 69-71 band the target could never exceed 71 no matter
+        # how many times the occupant said they felt cold. Same reasoning as
+        # the tracking trim, which is likewise bound by the DEVICE's range
+        # rather than the room's band; _async_send_setpoint enforces that
+        # device range, and the helper's own +-FEEDBACK_BIAS_LIMIT caps the
+        # excursion, so a runaway helper still cannot command the impossible.
         bias = 0.0
         if self._feedback:
             raw_bias = self._read_float(self._feedback)
             if raw_bias is not None:
-                bias = max(-2.0, min(2.0, raw_bias))
+                bias = max(-FEEDBACK_BIAS_LIMIT, min(FEEDBACK_BIAS_LIMIT, raw_bias))
                 fuzzy_target += bias
-        fuzzy_target = self._clamp_comfort(fuzzy_target)  # structural, twice over
 
         # Rate-limit how fast the effective target may move (no chattering).
         if self._effective_target is None:
@@ -756,17 +797,21 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             trim = self._tracking_gain * (room_now - raw)
             trim = max(-self._tracking_max, min(self._tracking_max, trim))
             raw = raw - trim
-            # Bound by the DEVICE's supported range, not the room's comfort
-            # band - the trim exists precisely to push a shared thermostat
-            # beyond the tracked room's band. tracking_max already caps the
-            # excursion; this only guards against commanding the impossible.
-            dev_min = wstate.attributes.get("min_temp")
-            dev_max = wstate.attributes.get("max_temp")
-            if dev_min is not None:
-                raw = max(float(dev_min), raw)
-            if dev_max is not None:
-                raw = min(float(dev_max), raw)
         self._extra[ATTR_TRACKING_TRIM] = round(trim, 2)
+
+        # Bound by the DEVICE's supported range, not the room's comfort band.
+        # Both the tracking trim and the occupant's feedback bias exist
+        # precisely to push a setpoint beyond that band, and each caps its own
+        # excursion; this is the one guard against commanding the impossible.
+        # It runs unconditionally - it used to live inside the tracking branch
+        # above, which left an instance with tracking disabled (the common
+        # single-room case) with no device bound at all.
+        dev_min = wstate.attributes.get("min_temp")
+        dev_max = wstate.attributes.get("max_temp")
+        if dev_min is not None:
+            raw = max(float(dev_min), raw)
+        if dev_max is not None:
+            raw = min(float(dev_max), raw)
         held = wstate.attributes.get(ATTR_TEMPERATURE)
         if held is not None:
             held = float(held)
