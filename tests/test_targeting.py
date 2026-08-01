@@ -10,6 +10,7 @@ from custom_components.fuzzy_thermostat.fuzzy.targeting import (
     clamp_to_device,
     compose_target,
     outdoor_drive,
+    sum_biases,
 )
 
 
@@ -135,3 +136,39 @@ def test_the_office_morning_case_end_to_end():
     p = 0.0                                     # mild => relaxed end
     rules_target = 73 - p * (73 - 69)
     assert compose_target(rules_target, comfort_min=69, comfort_max=73) == 73.0
+
+
+# -- sum_biases ---------------------------------------------------------
+
+
+def test_a_single_bias_behaves_as_before():
+    assert sum_biases([1.0]) == 1.0
+    assert sum_biases([-2.0]) == -2.0
+
+
+def test_independent_biases_sum_rather_than_override():
+    """The occupant and a load-shed interlock are both real requests.
+
+    Whichever was written second must not silently discard the other.
+    """
+    assert sum_biases([1.0, 1.0]) == 2.0
+    assert sum_biases([-1.0, 1.0]) == 0.0
+
+
+def test_the_total_is_capped_even_when_each_part_is_legal():
+    """Adding helpers must not widen the authority delegated to the bias."""
+    assert sum_biases([2.0, 2.0]) == 2.0
+    assert sum_biases([-2.0, -2.0]) == -2.0
+
+
+def test_each_contribution_is_capped_before_summing():
+    assert sum_biases([99.0, -1.0]) == 1.0
+
+
+def test_unavailable_helpers_contribute_nothing():
+    assert sum_biases([1.0, None]) == 1.0
+    assert sum_biases([None, None]) == 0.0
+
+
+def test_no_helpers_is_zero():
+    assert sum_biases([]) == 0.0

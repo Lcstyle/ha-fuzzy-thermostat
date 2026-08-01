@@ -33,7 +33,26 @@ veto which signal**:
 
 from __future__ import annotations
 
-__all__ = ["outdoor_drive", "compose_target", "clamp_to_device"]
+__all__ = ["outdoor_drive", "sum_biases", "compose_target", "clamp_to_device"]
+
+
+def sum_biases(values, limit: float = 2.0) -> float:
+    """Combine several independent reasons to deviate from the comfort band.
+
+    Each contribution is capped at ``+-limit`` and so is the total, so adding
+    helpers can never widen the authority the band has already delegated. They
+    SUM rather than override because each is a real request from a different
+    quarter — the occupant saying they feel cold, an interlock easing this zone
+    off while a larger system runs — and one must not silently mask another.
+
+    ``None`` entries (an unavailable helper) contribute nothing.
+    """
+    total = 0.0
+    for value in values:
+        if value is None:
+            continue
+        total += max(-limit, min(limit, value))
+    return max(-limit, min(limit, total))
 
 
 def outdoor_drive(

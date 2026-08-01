@@ -137,7 +137,12 @@ from .fuzzy import (
     build_load_controller,
     build_setpoint_controller,
 )
-from .fuzzy.targeting import clamp_to_device, compose_target, outdoor_drive
+from .fuzzy.targeting import (
+    clamp_to_device,
+    compose_target,
+    outdoor_drive,
+    sum_biases,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -215,7 +220,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         # Humidity compensation: RH% is universal, so the breakpoints have
         # safe defaults and only the sensor is needed to enable it.
         vol.Optional(CONF_HUMIDITY_SENSOR): cv.entity_id,
-        vol.Optional(CONF_FEEDBACK_ENTITY): cv.entity_id,
+        vol.Optional(CONF_FEEDBACK_ENTITY): vol.All(cv.ensure_list, [cv.entity_id]),
         vol.Optional(CONF_TRACKING_GAIN, default=0.0): vol.Coerce(float),
         vol.Optional(CONF_TRACKING_MAX, default=3.0): vol.Coerce(float),
         vol.Optional(CONF_HUMIDITY_DRY, default=45.0): vol.Coerce(float),
@@ -316,7 +321,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             config.get(CONF_OUTDOOR_MILD, unit_default("outdoor_mild")),
             config.get(CONF_OUTDOOR_TORRID, unit_default("outdoor_torrid")),
         )
-        self._feedback = config.get(CONF_FEEDBACK_ENTITY)
+        self._feedback: list[str] = config.get(CONF_FEEDBACK_ENTITY) or []
         self._tracking_gain = config[CONF_TRACKING_GAIN]
         self._tracking_max = config[CONF_TRACKING_MAX]
         self._load_sensor = config.get(CONF_LOAD_SENSOR)
@@ -376,7 +381,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             # the loop in the meantime.
             self._unsub.append(
                 async_track_state_change_event(
-                    self.hass, [self._feedback], self._feedback_changed
+                    self.hass, self._feedback, self._feedback_changed
                 )
             )
         self._unsub.append(
@@ -566,11 +571,15 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         # THEN the occupant is heard); see fuzzy/targeting.py for why that
         # order is load-bearing. _async_send_setpoint bounds the result by the
         # device's own range.
-        bias = 0.0
-        if self._feedback:
-            raw_bias = self._read_float(self._feedback)
-            if raw_bias is not None:
-                bias = max(-FEEDBACK_BIAS_LIMIT, min(FEEDBACK_BIAS_LIMIT, raw_bias))
+        # Several independent reasons to deviate from the band can coexist -
+        # the occupant saying they feel cold, a load-shedding interlock backing
+        # this zone off while a bigger system runs. They SUM: each is a real
+        # request, and one must not silently mask another. Each contribution is
+        # capped, and so is the total, so adding helpers can never widen the
+        # authority the band has already delegated.
+        bias = sum_biases(
+            [self._read_float(e) for e in self._feedback], FEEDBACK_BIAS_LIMIT
+        )
         fuzzy_target = compose_target(
             fuzzy_target,
             comfort_min=self._comfort_min,
