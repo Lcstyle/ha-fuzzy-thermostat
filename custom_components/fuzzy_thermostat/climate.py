@@ -137,6 +137,7 @@ from .fuzzy import (
     build_load_controller,
     build_setpoint_controller,
 )
+from .fuzzy.targeting import clamp_to_device, compose_target, outdoor_drive
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -516,18 +517,13 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         # climb back in for anyone who does want to pre-cool; 1.0 restores the
         # old behaviour exactly. Temporal responsiveness belongs here; letting a
         # transient preference fade belongs in the feedback helper's own decay.
-        outdoor_drive: float | None = None
+        drive: float | None = None
         if self._outdoor and self._direction == DIRECTION_COOL:
-            now_outdoor = self._read_float(self._outdoor)
-            forecast = self._read_float(self._forecast_high)
-            if now_outdoor is not None:
-                outdoor_drive = now_outdoor
-                if forecast is not None and self._forecast_weight > 0:
-                    climb = max(0.0, forecast - now_outdoor)
-                    outdoor_drive = now_outdoor + self._forecast_weight * climb
-            elif forecast is not None:
-                # No live reading at all - the forecast is better than nothing.
-                outdoor_drive = forecast
+            drive = outdoor_drive(
+                self._read_float(self._outdoor),
+                self._read_float(self._forecast_high),
+                self._forecast_weight,
+            )
 
         # Two independent drivers can push the setpoint toward its aggressive
         # bound: the weather, and the room's own internal load. They FUSE AS
@@ -539,8 +535,8 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         p_load: float | None = None
         p_humidity: float | None = None
         indoor_humidity: float | None = None
-        if outdoor_drive is not None:
-            p_outdoor = self._setpoint.evaluate({"outdoor": outdoor_drive}).value
+        if drive is not None:
+            p_outdoor = self._setpoint.evaluate({"outdoor": drive}).value
         if self._load is not None and self._direction == DIRECTION_COOL:
             load_value = self._read_float(self._load_sensor)
             if load_value is not None:
@@ -563,31 +559,25 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             fuzzy_target = self._clamp_comfort(self._attr_target_temperature)
             margin = self._margin_wide
 
-        # The comfort band is the STRUCTURAL bound on what the fuzzy rules may
-        # ask for, so clamp the rules' output here, before the occupant has a
-        # say.
-        fuzzy_target = self._clamp_comfort(fuzzy_target)
-
         # HUMAN FEEDBACK: comfort is ultimately subjective, and no sensor
         # measures the occupant. feedback_entity (any input_number, in degrees)
         # biases the fused target directly - "I'm feeling warm" nudges it down
-        # a degree.
-        #
-        # Applied AFTER the comfort clamp, deliberately. The bias exists
-        # precisely because the band is wrong for this person right now, so
-        # clamping it back into the band made it saturate at the edge and do
-        # nothing: with a 69-71 band the target could never exceed 71 no matter
-        # how many times the occupant said they felt cold. Same reasoning as
-        # the tracking trim, which is likewise bound by the DEVICE's range
-        # rather than the room's band; _async_send_setpoint enforces that
-        # device range, and the helper's own +-FEEDBACK_BIAS_LIMIT caps the
-        # excursion, so a runaway helper still cannot command the impossible.
+        # a degree. compose_target owns the ordering (band clamps the rules,
+        # THEN the occupant is heard); see fuzzy/targeting.py for why that
+        # order is load-bearing. _async_send_setpoint bounds the result by the
+        # device's own range.
         bias = 0.0
         if self._feedback:
             raw_bias = self._read_float(self._feedback)
             if raw_bias is not None:
                 bias = max(-FEEDBACK_BIAS_LIMIT, min(FEEDBACK_BIAS_LIMIT, raw_bias))
-                fuzzy_target += bias
+        fuzzy_target = compose_target(
+            fuzzy_target,
+            comfort_min=self._comfort_min,
+            comfort_max=self._comfort_max,
+            bias=bias,
+            bias_limit=FEEDBACK_BIAS_LIMIT,
+        )
 
         # Rate-limit how fast the effective target may move (no chattering).
         if self._effective_target is None:
@@ -607,7 +597,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             ATTR_FUZZY_TARGET: round(self._effective_target, 2),
             ATTR_ACTIVATION_MARGIN: round(margin, 2),
             ATTR_TREND: round(trend, 2),
-            ATTR_OUTDOOR_DRIVE: outdoor_drive,
+            ATTR_OUTDOOR_DRIVE: drive,
             ATTR_OUTDOOR_POSITION: round(p_outdoor, 3) if p_outdoor is not None else None,
             ATTR_LOAD_POSITION: round(p_load, 3) if p_load is not None else None,
             ATTR_LOAD_SMOOTHED: round(self._load_ema, 1)
@@ -818,19 +808,17 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             raw = raw - trim
         self._extra[ATTR_TRACKING_TRIM] = round(trim, 2)
 
-        # Bound by the DEVICE's supported range, not the room's comfort band.
-        # Both the tracking trim and the occupant's feedback bias exist
-        # precisely to push a setpoint beyond that band, and each caps its own
-        # excursion; this is the one guard against commanding the impossible.
-        # It runs unconditionally - it used to live inside the tracking branch
-        # above, which left an instance with tracking disabled (the common
-        # single-room case) with no device bound at all.
+        # Bound by the DEVICE's supported range, not the room's comfort band -
+        # see fuzzy/targeting.clamp_to_device. Runs unconditionally: it used to
+        # live inside the tracking branch above, which left an instance with
+        # tracking disabled (the common single-room case) with no device bound.
         dev_min = wstate.attributes.get("min_temp")
         dev_max = wstate.attributes.get("max_temp")
-        if dev_min is not None:
-            raw = max(float(dev_min), raw)
-        if dev_max is not None:
-            raw = min(float(dev_max), raw)
+        raw = clamp_to_device(
+            raw,
+            float(dev_min) if dev_min is not None else None,
+            float(dev_max) if dev_max is not None else None,
+        )
         held = wstate.attributes.get(ATTR_TEMPERATURE)
         if held is not None:
             held = float(held)
