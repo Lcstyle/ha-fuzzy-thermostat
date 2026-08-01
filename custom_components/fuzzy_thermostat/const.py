@@ -10,6 +10,7 @@ CONF_CLIMATE_ENTITY = "climate_entity"
 CONF_DIRECTION = "direction"
 CONF_OUTDOOR_SENSOR = "outdoor_sensor"
 CONF_FORECAST_HIGH_SENSOR = "forecast_high_sensor"
+CONF_FORECAST_WEIGHT = "forecast_weight"
 CONF_COMFORT_MIN = "comfort_min"
 CONF_COMFORT_MAX = "comfort_max"
 CONF_OUTDOOR_MILD = "outdoor_mild"
@@ -62,6 +63,13 @@ ATTR_TRACKING_TRIM = "tracking_trim"
 # Defaults that do not depend on the unit system.
 DEFAULT_SAMPLE_INTERVAL_S = 300
 DEFAULT_LOAD_SMOOTHING_S = 900
+# How much of the forecast high to fold into the outdoor drive. 0 = follow the
+# weather that actually exists; 1 = the old max(now, forecast) behaviour, which
+# reasons as though it were already the hottest moment of the day from midnight
+# onward. Defaults to 0 because the controller must be temporally responsive:
+# anticipation that never relaxes is not anticipation, it is a permanently
+# pessimistic constant.
+DEFAULT_FORECAST_WEIGHT = 0.0
 # The margin (target + margin) is the intended binding start gate; demand only
 # contributes direction and trend damping. At 0.35 on a wide temperature
 # universe the demand gate accidentally out-ranked the margin and would hold

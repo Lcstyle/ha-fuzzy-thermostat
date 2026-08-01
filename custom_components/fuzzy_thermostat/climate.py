@@ -93,6 +93,7 @@ from .const import (
     CONF_DEMAND_ON,
     CONF_DIRECTION,
     CONF_FORECAST_HIGH_SENSOR,
+    CONF_FORECAST_WEIGHT,
     CONF_HEATER,
     CONF_HUMIDITY_DRY,
     CONF_HUMIDITY_HUMID,
@@ -122,6 +123,7 @@ from .const import (
     DEFAULT_MIN_CYCLE_S,
     DEFAULT_SAMPLE_INTERVAL_S,
     DEFAULT_LOAD_SMOOTHING_S,
+    DEFAULT_FORECAST_WEIGHT,
     DEFAULT_TREND_WINDOW_S,
     DEFAULTS_BY_UNIT,
     DIRECTION_COOL,
@@ -158,6 +160,9 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         ),
         vol.Optional(CONF_OUTDOOR_SENSOR): cv.entity_id,
         vol.Optional(CONF_FORECAST_HIGH_SENSOR): cv.entity_id,
+        vol.Optional(
+            CONF_FORECAST_WEIGHT, default=DEFAULT_FORECAST_WEIGHT
+        ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=1.0)),
         vol.Optional(CONF_OUTDOOR_MILD): vol.Coerce(float),
         vol.Optional(CONF_OUTDOOR_TORRID): vol.Coerce(float),
         vol.Optional(CONF_MARGIN_WIDE): vol.Coerce(float),
@@ -262,6 +267,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         self._wrapped = config.get(CONF_CLIMATE_ENTITY)
         self._outdoor = config.get(CONF_OUTDOOR_SENSOR)
         self._forecast_high = config.get(CONF_FORECAST_HIGH_SENSOR)
+        self._forecast_weight = config[CONF_FORECAST_WEIGHT]
         self._manage_power = config[CONF_MANAGE_POWER]
         self._style = config[CONF_CONTROL_STYLE]
         self._companions: list[str] = config.get(CONF_COMPANION_ENTITIES) or []
@@ -496,19 +502,32 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         trend = self._trend(now)
 
         # -- WHAT to aim for: outdoor-compensated target within hard bounds --
+        # The drive is the weather that ACTUALLY EXISTS, so the setpoint tracks
+        # the day as it happens. This used to be max(outdoor_now, forecast_high)
+        # to "anticipate the afternoon", but a max against the day's peak never
+        # relaxes: from midnight onward the controller reasoned as though it
+        # were already the hottest moment of the day, parking the target at the
+        # aggressive bound straight through a cool morning. That is not
+        # anticipation, it is a permanently pessimistic constant - and it is
+        # felt most exactly when it is least justified, at dawn, in a room that
+        # is already at the mild end of its band.
+        #
+        # forecast_weight (default 0) folds a FRACTION of the day's expected
+        # climb back in for anyone who does want to pre-cool; 1.0 restores the
+        # old behaviour exactly. Temporal responsiveness belongs here; letting a
+        # transient preference fade belongs in the feedback helper's own decay.
         outdoor_drive: float | None = None
         if self._outdoor and self._direction == DIRECTION_COOL:
-            readings = [
-                r
-                for r in (
-                    self._read_float(self._outdoor),
-                    self._read_float(self._forecast_high),
-                )
-                if r is not None
-            ]
-            if readings:
-                # Anticipate the afternoon instead of chasing it.
-                outdoor_drive = max(readings)
+            now_outdoor = self._read_float(self._outdoor)
+            forecast = self._read_float(self._forecast_high)
+            if now_outdoor is not None:
+                outdoor_drive = now_outdoor
+                if forecast is not None and self._forecast_weight > 0:
+                    climb = max(0.0, forecast - now_outdoor)
+                    outdoor_drive = now_outdoor + self._forecast_weight * climb
+            elif forecast is not None:
+                # No live reading at all - the forecast is better than nothing.
+                outdoor_drive = forecast
 
         # Two independent drivers can push the setpoint toward its aggressive
         # bound: the weather, and the room's own internal load. They FUSE AS

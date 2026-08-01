@@ -140,7 +140,8 @@ climate:
 | `heater` / `cooler` / `climate_entity` | one required | the actuator |
 | `direction` | `cool` | `heat`/`cool`, for `climate_entity` wiring |
 | `outdoor_sensor` | — | enables outdoor compensation (cooling) |
-| `forecast_high_sensor` | — | anticipates the day's peak |
+| `forecast_high_sensor` | — | the day's expected peak, folded in by `forecast_weight` |
+| `forecast_weight` | `0` | How much of the climb from the current outdoor temperature to `forecast_high_sensor` to fold into the outdoor drive, `0`–`1`. `0` follows the weather that actually exists. `1` restores the old `max(now, forecast)` behaviour, which never relaxes: from midnight onward it reasons as though it were already the hottest moment of the day, parking the setpoint at the aggressive bound straight through a cool morning. Raise it only if you genuinely want to pre-cool against a peak that has not arrived. |
 | `outdoor_mild` / `outdoor_torrid` | 72/92 °F, 22/33 °C | compensation curve ends |
 | `margin_wide` / `margin_narrow` | 2.5/1.0 °F, 1.4/0.6 °C | start-conditioning margin at mild/torrid |
 | `sample_interval` | 5 min | evaluation cadence |
