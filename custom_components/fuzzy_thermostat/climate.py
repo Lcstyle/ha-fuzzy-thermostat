@@ -18,8 +18,13 @@ Supervisor mode (``climate_entity:``)
 
 Design rules carried throughout:
 
-* Bounded authority — the computed target can never leave
-  ``[comfort_min, comfort_max]``; the bound is structural, not aspirational.
+* Bounded authority — the fuzzy RULES can never leave
+  ``[comfort_min, comfort_max]``; that bound is structural, not aspirational.
+  Two authorities deliberately reach past it, both capped: the occupant bias
+  (``feedback_entity``), which exists because the band can be wrong for a
+  person right now, and the seasonal dial (``comfort_shift_entity``), which
+  moves the band itself. ``clamp_to_device`` — the only bound that is a fact
+  rather than a preference — has the last word at send time.
 * Fail safe — an unavailable sensor idles the controller and says so in the
   ``control_reason`` attribute. It never guesses.
 * Observable — the demand, the computed target, and the rules that fired are
@@ -76,6 +81,8 @@ from .const import (
     ATTR_HUMIDITY_POSITION,
     ATTR_INDOOR_HUMIDITY,
     ATTR_FEEDBACK_BIAS,
+    ATTR_COMFORT_SHIFT,
+    ATTR_COMFORT_BAND,
     ATTR_TRACKING_TRIM,
     ATTR_LOAD_POSITION,
     ATTR_LOAD_SMOOTHED,
@@ -98,6 +105,11 @@ from .const import (
     CONF_HUMIDITY_DRY,
     CONF_HUMIDITY_HUMID,
     CONF_FEEDBACK_ENTITY,
+    CONF_FEEDBACK_BIAS_LIMIT,
+    CONF_COMFORT_SHIFT_ENTITY,
+    CONF_COMFORT_SHIFT_LIMIT,
+    CONF_HUMIDITY_CAP,
+    CONF_OUTDOOR_FRIGID,
     CONF_TRACKING_GAIN,
     CONF_TRACKING_MAX,
     CONF_HUMIDITY_SENSOR,
@@ -125,6 +137,7 @@ from .const import (
     DEFAULT_LOAD_SMOOTHING_S,
     DEFAULT_FORECAST_WEIGHT,
     DEFAULT_TREND_WINDOW_S,
+    DEFAULT_HUMIDITY_CAP,
     DEFAULTS_BY_UNIT,
     DIRECTION_COOL,
     DIRECTION_HEAT,
@@ -141,7 +154,9 @@ from .fuzzy.targeting import (
     clamp_to_device,
     compose_target,
     outdoor_drive,
+    seasonal_band,
     sum_biases,
+    target_from_position,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -149,7 +164,11 @@ _LOGGER = logging.getLogger(__name__)
 # How far the occupant's feedback helper may move the target, in degrees.
 # Referenced twice - once to widen the entity's advertised limits, once to
 # clamp the helper itself - so the two can never disagree.
-FEEDBACK_BIAS_LIMIT = 2.0
+# NOTE: the old module-level FEEDBACK_BIAS_LIMIT constant is gone. It was hard-coded
+# at 2.0, which quietly made a wider seasonal authority unreachable through the bias
+# path -- the office needed a +-5 dial and could not have one. It is now
+# `feedback_bias_limit` in config, and the seasonal dial is a separate authority
+# entirely (see fuzzy/targeting.seasonal_band) rather than an abuse of the bias.
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
@@ -171,6 +190,25 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=1.0)),
         vol.Optional(CONF_OUTDOOR_MILD): vol.Coerce(float),
         vol.Optional(CONF_OUTDOOR_TORRID): vol.Coerce(float),
+        # Heating's aggressive anchor. Ignored under direction: cool.
+        vol.Optional(CONF_OUTDOOR_FRIGID): vol.Coerce(float),
+        # No static default: these are degrees, so they come from DEFAULTS_BY_UNIT
+        # like every other degree-dimensioned option.
+        vol.Optional(CONF_FEEDBACK_BIAS_LIMIT): vol.All(
+            vol.Coerce(float), vol.Range(min=0.0)
+        ),
+        # The seasonal dial. Any number of helpers, summed then capped, sliding
+        # the whole band rather than deviating from it.
+        vol.Optional(CONF_COMFORT_SHIFT_ENTITY): cv.entity_ids,
+        vol.Optional(CONF_COMFORT_SHIFT_LIMIT): vol.All(
+            vol.Coerce(float), vol.Range(min=0.0)
+        ),
+        # min_included=False: a cap of exactly 0 passes vol.Range(min=0.0) and then
+        # raises out of build_humidity_controller inside __init__, which surfaces as a
+        # traceback rather than a config error.
+        vol.Optional(
+            CONF_HUMIDITY_CAP, default=DEFAULT_HUMIDITY_CAP
+        ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=1.0, min_included=False)),
         vol.Optional(CONF_MARGIN_WIDE): vol.Coerce(float),
         vol.Optional(CONF_MARGIN_NARROW): vol.Coerce(float),
         vol.Optional(CONF_MIN_TEMP): vol.Coerce(float),
@@ -308,18 +346,73 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         # so the entity's own limits must leave room for it - otherwise
         # target_temperature would report a value outside its own min/max the
         # moment someone says they feel cold.
-        bias_room = FEEDBACK_BIAS_LIMIT if config.get(CONF_FEEDBACK_ENTITY) else 0.0
-        self._attr_min_temp = self._comfort_min - bias_room
-        self._attr_max_temp = self._comfort_max + bias_room
+        self._bias_limit = config.get(
+            CONF_FEEDBACK_BIAS_LIMIT, unit_default("feedback_bias_limit")
+        )
+        self._shift_entities: list[str] = config.get(CONF_COMFORT_SHIFT_ENTITY) or []
+        self._shift_limit = config.get(
+            CONF_COMFORT_SHIFT_LIMIT, unit_default("comfort_shift_limit")
+        )
+        self._comfort_shift = 0.0
+        # Both authorities need headroom in the entity's own limits, and they need it
+        # for different reasons: the bias deviates FROM the band, the seasonal dial
+        # MOVES it. A dial at its stop plus a bias at its stop is a real, reachable
+        # COMMANDED value -- verified: with a 70-73 band, limit 2 and dial 5, the
+        # composed target reaches exactly 63.0 and 80.0 -- so the room has to be the
+        # sum or the entity would advertise limits its own output steps outside.
+        #
+        # Note what this is NOT about: `target_temperature` is the stored anchor, and
+        # it is bounded by these limits directly (see _clamp_anchor), so the bias can
+        # never push THAT outside its min/max. The earlier comment here claimed it
+        # could; it cannot, because the bias is never written back to the anchor.
+        bias_room = self._bias_limit if config.get(CONF_FEEDBACK_ENTITY) else 0.0
+        shift_room = self._shift_limit if self._shift_entities else 0.0
+        self._attr_min_temp = self._comfort_min - bias_room - shift_room
+        self._attr_max_temp = self._comfort_max + bias_room + shift_room
+        # The STORED anchor may travel with the band, and only with the band. The bias
+        # never touches the anchor (it is applied to the composed target), so letting
+        # the anchor range widen by bias_room too would let target_temperature report a
+        # number the controller will not honour: on a 70-73 band with a bias helper and
+        # no dial, set 75 and it would report 75 forever while commanding 73. That is
+        # the same "reports a number it will not honour" shape this clamp was changed
+        # to remove, one size smaller.
+        self._anchor_min = self._comfort_min - shift_room
+        self._anchor_max = self._comfort_max + shift_room
 
         # Trend universe: |3 F/h| (|1.7 C/h|) counts as clearly moving.
         self._trend_limit = 3.0 if us else 1.7
         self._command = build_command_controller(
             t_min, t_max, trend_limit=self._trend_limit
         )
+        # The weather channel now exists in both directions. The two anchors are always
+        # passed low-end first; which end is aggressive is the direction's business.
+        # Heating reads `outdoor_mild` as its RELAXED end -- the same config key as
+        # cooling, but a different default (62F/17C, where heating stops being wanted,
+        # not 72F/22C) -- and `outdoor_frigid` as its aggressive end, defaulting to a
+        # design-day 10F/-12C. Both come from DEFAULTS_BY_UNIT rather than being derived
+        # from the cooling pair; see the note there for what the derived version did.
+        if self._direction == DIRECTION_HEAT:
+            # Heating's relax anchor is where heating stops being wanted (~62F), NOT
+            # the cooling `outdoor_mild` (~72F), and its aggressive anchor is a design
+            # day. Deriving either from the cooling pair produced a curve that
+            # saturated at p=1 below 52F -- a constant across most of a real heating
+            # season, which is exactly the "permanently pessimistic constant" this
+            # project already rejected once for the forecast drive.
+            low = config.get(CONF_OUTDOOR_FRIGID, unit_default("outdoor_frigid"))
+            high = config.get(CONF_OUTDOOR_MILD, unit_default("heat_mild"))
+        else:
+            low = config.get(CONF_OUTDOOR_MILD, unit_default("outdoor_mild"))
+            high = config.get(CONF_OUTDOOR_TORRID, unit_default("outdoor_torrid"))
+        if not low < high:
+            raise vol.Invalid(
+                f"outdoor anchors must increase: got {low} and {high}. Under "
+                f"direction: {self._direction} the low anchor is "
+                + ("outdoor_frigid and the high is outdoor_mild"
+                   if self._direction == DIRECTION_HEAT
+                   else "outdoor_mild and the high is outdoor_torrid")
+            )
         self._setpoint = build_setpoint_controller(
-            config.get(CONF_OUTDOOR_MILD, unit_default("outdoor_mild")),
-            config.get(CONF_OUTDOOR_TORRID, unit_default("outdoor_torrid")),
+            low, high, direction=self._direction
         )
         self._feedback: list[str] = config.get(CONF_FEEDBACK_ENTITY) or []
         self._tracking_gain = config[CONF_TRACKING_GAIN]
@@ -336,7 +429,10 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         self._humidity_sensor = config.get(CONF_HUMIDITY_SENSOR)
         self._humidity = (
             build_humidity_controller(
-                config[CONF_HUMIDITY_DRY], config[CONF_HUMIDITY_HUMID]
+                config[CONF_HUMIDITY_DRY],
+                config[CONF_HUMIDITY_HUMID],
+                cap=config[CONF_HUMIDITY_CAP],
+                direction=self._direction,
             )
             if self._humidity_sensor
             else None
@@ -363,7 +459,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             if last.state in (m.value for m in self._attr_hvac_modes):
                 self._attr_hvac_mode = HVACMode(last.state)
             if (anchor := last.attributes.get(ATTR_TEMPERATURE)) is not None:
-                self._attr_target_temperature = self._clamp_comfort(float(anchor))
+                self._attr_target_temperature = self._clamp_anchor(float(anchor))
 
         self._unsub.append(
             async_track_state_change_event(
@@ -421,7 +517,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         if (temp := kwargs.get(ATTR_TEMPERATURE)) is not None:
-            self._attr_target_temperature = self._clamp_comfort(float(temp))
+            self._attr_target_temperature = self._clamp_anchor(float(temp))
             await self._async_control()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -462,8 +558,42 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         except ValueError:
             return None
 
+    def _effective_band(self) -> tuple[float, float]:
+        """The comfort band as the season has left it.
+
+        Every consumer of the band goes through here, so a seasonal dial cannot
+        move one of them and forget another -- the p-to-target mapping, the
+        clamp, and the reported attribute all read the same two numbers.
+        """
+        return seasonal_band(
+            self._comfort_min, self._comfort_max,
+            self._comfort_shift, self._shift_limit,
+        )
+
+    def _clamp_anchor(self, value: float) -> float:
+        """Bound a STORED setpoint by the entity's advertised limits, not the band.
+
+        The band moves with the seasonal dial; the advertised limits do not. Clamping
+        a stored anchor to the band was wrong in both directions, because the stored
+        value outlives the reading that shaped it:
+
+        * On restore and on the first `set_temperature`, `_comfort_shift` is still its
+          initial 0.0 -- the dial is only read inside `_async_control` -- so a +5 dial
+          meant a 78 anchor was clamped to 73 against the UNSHIFTED band and never
+          recovered, while the entity went on enforcing [75, 78].
+        * With the anchor already at 78 and the dial swung back to 0, clamping to the
+          band would report a target above the band it is enforcing.
+
+        The honest bound is the band's own TRAVEL -- comfort_min/max widened by
+        `comfort_shift_limit` and nothing else. It does not move underneath a stored
+        value, and it excludes the bias room, which belongs to the composed target
+        rather than to the anchor.
+        """
+        return min(self._anchor_max, max(self._anchor_min, value))
+
     def _clamp_comfort(self, value: float) -> float:
-        return min(self._comfort_max, max(self._comfort_min, value))
+        lo, hi = self._effective_band()
+        return min(hi, max(lo, value))
 
     def _trend(self, now: datetime) -> float:
         """Temperature slope over the configured window, in degrees/hour."""
@@ -507,6 +637,15 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         self._samples.append((now, room))
         trend = self._trend(now)
 
+        # THE SEASON, read before anything consults the band. Summed like the feedback
+        # helpers so several reasons can coexist (a manual dial, an away setback), and
+        # capped by its own limit rather than the bias limit -- they are different
+        # authorities with different magnitudes.
+        self._comfort_shift = sum_biases(
+            [self._read_float(e) for e in self._shift_entities], self._shift_limit
+        )
+        comfort_min, comfort_max = self._effective_band()
+
         # -- WHAT to aim for: outdoor-compensated target within hard bounds --
         # The drive is the weather that ACTUALLY EXISTS, so the setpoint tracks
         # the day as it happens. This used to be max(outdoor_now, forecast_high)
@@ -523,7 +662,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         # old behaviour exactly. Temporal responsiveness belongs here; letting a
         # transient preference fade belongs in the feedback helper's own decay.
         drive: float | None = None
-        if self._outdoor and self._direction == DIRECTION_COOL:
+        if self._outdoor:
             drive = outdoor_drive(
                 self._read_float(self._outdoor),
                 self._read_float(self._forecast_high),
@@ -542,25 +681,76 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         indoor_humidity: float | None = None
         if drive is not None:
             p_outdoor = self._setpoint.evaluate({"outdoor": drive}).value
+        # STILL COOLING-ONLY, and deliberately. Internal dissipation ADDS heat, so for
+        # cooling it argues the same way the weather does and fuses as max(). For heating
+        # it argues the OPPOSITE way -- a room full of running equipment needs less heat,
+        # not more -- and a relaxing signal must never be max()'d against an aggravating
+        # one, or the busiest room would demand the most heat. Wiring it up needs a
+        # different composition rule (min, or a subtraction), which is its own design
+        # question rather than a gate to delete.
         if self._load is not None and self._direction == DIRECTION_COOL:
             load_value = self._read_float(self._load_sensor)
             if load_value is not None:
                 load_value = self._smooth_load(load_value, now)
                 p_load = self._load.evaluate({"load": load_value}).value
-        if self._humidity is not None and self._direction == DIRECTION_COOL:
+        if self._humidity is not None:
             indoor_humidity = self._read_float(self._humidity_sensor)
             if indoor_humidity is not None:
                 p_humidity = self._humidity.evaluate(
                     {"humidity": indoor_humidity}
                 ).value
-        positions = [p for p in (p_outdoor, p_load, p_humidity) if p is not None]
-        if positions:
+        # WHICH CHANNELS MAY COMMAND THE BAND, and which may only nudge.
+        #
+        # The weather channel spans the full [0, 1]. Load and humidity do NOT -- load
+        # tops out at 2/3 and humidity at `humidity_cap` (1/3 by default), measured, not
+        # assumed: build_load_controller(40, 90) returns 0.667 at load 90 and above.
+        # (An earlier version of this comment called them both "capped thirds", which is
+        # wrong about load and was the sort of number that gets repeated instead of
+        # checked. Its own docstring says "p in [0, 1], like the outdoor controller",
+        # which is wrong in the other direction. 2/3 is what the code does.)
+        #
+        # What matters is not the exact cap but that there IS one: both are designed as
+        # CONTRIBUTORS to a max() fusion the weather channel anchors. A capped channel
+        # left alone is not a small signal -- it is a signal that can never leave the
+        # relaxed end, and mapping it across the whole band pins the target there and
+        # discards the user's setpoint entirely.
+        #
+        # Harmless-looking under cooling, where the relaxed end is comfort_max. Under
+        # heating it is the FLOOR: an instance with a humidity sensor and no outdoor
+        # sensor, user setpoint 20C on a 17-21C band, commanded 18.3 at 25% RH and
+        # 17.0 at 85% -- silently overriding the occupant downward on a damp day. So
+        # when no full-authority channel is present, the capped ones bias the ANCHOR
+        # toward the aggressive bound instead of replacing it. Every configured sensor
+        # still means something; none of them gets to throw the setpoint away.
+        #
+        # THIS MOVES COOLING TOO, and that is deliberate rather than collateral. A
+        # cooling instance with a load sensor and no outdoor sensor -- the equipment-
+        # dense office the load channel was written for -- used to command comfort_max
+        # whenever the load was idle, discarding the setpoint exactly as the heating
+        # case did. Band 70-76 with the anchor at 73: idle load commanded 76.0 before
+        # and commands 73.0 now. Same defect, same fix, less alarming symptom.
+        capped = [q for q in (p_load, p_humidity) if q is not None]
+        if p_outdoor is None and capped:
+            p = max(capped)
+            anchor = self._clamp_comfort(self._attr_target_temperature)
+            aggressive = comfort_max if self._direction == DIRECTION_HEAT else comfort_min
+            fuzzy_target = anchor + p * (aggressive - anchor)
+            margin = self._margin_wide - p * (self._margin_wide - self._margin_narrow)
+            positions = [p]
+        else:
+            positions = [q for q in (p_outdoor, *capped) if q is not None]
+        if p_outdoor is not None:
             p = max(positions)
-            fuzzy_target = self._comfort_max - p * (
-                self._comfort_max - self._comfort_min
+            # Direction-aware, and this is the line the whole heating change turns on.
+            # p is "how hard should this be working"; comfort_max is the relaxed end for
+            # cooling and the AGGRESSIVE end for heating. The old expression inlined
+            # cooling's mapping, so ungating the channels without this would have aimed a
+            # heating instance at comfort_min on the coldest night of the year.
+            fuzzy_target = target_from_position(
+                p, comfort_min, comfort_max, self._direction
             )
             margin = self._margin_wide - p * (self._margin_wide - self._margin_narrow)
-        else:
+        elif not positions:
             fuzzy_target = self._clamp_comfort(self._attr_target_temperature)
             margin = self._margin_wide
 
@@ -578,14 +768,14 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         # capped, and so is the total, so adding helpers can never widen the
         # authority the band has already delegated.
         bias = sum_biases(
-            [self._read_float(e) for e in self._feedback], FEEDBACK_BIAS_LIMIT
+            [self._read_float(e) for e in self._feedback], self._bias_limit
         )
         fuzzy_target = compose_target(
             fuzzy_target,
-            comfort_min=self._comfort_min,
-            comfort_max=self._comfort_max,
+            comfort_min=comfort_min,
+            comfort_max=comfort_max,
             bias=bias,
-            bias_limit=FEEDBACK_BIAS_LIMIT,
+            bias_limit=self._bias_limit,
         )
 
         # Rate-limit how fast the effective target may move (no chattering).
@@ -618,6 +808,11 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             else None,
             ATTR_INDOOR_HUMIDITY: indoor_humidity,
             ATTR_FEEDBACK_BIAS: bias,
+            # Published because the whole point of a dial is that a person can see
+            # where it is. The band is the SHIFTED one -- the numbers actually in force
+            # this cycle, not the ones in the YAML.
+            ATTR_COMFORT_SHIFT: self._comfort_shift,
+            ATTR_COMFORT_BAND: [round(comfort_min, 2), round(comfort_max, 2)],
             ATTR_ACTIVE_RULES: [
                 f"{text} ({strength:.2f})" for text, strength in result.top_rules()
             ],

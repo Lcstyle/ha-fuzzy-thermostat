@@ -6,8 +6,8 @@ the occupant and the hardware have had their say. It is deliberately free of
 any Home Assistant import so that the ordering rules below — which is to say,
 the part that has actually been wrong twice — can be tested directly.
 
-Two rules govern the composition, and both are about **which bound gets to
-veto which signal**:
+Three rules govern the composition. The first two are about **which bound gets
+to veto which signal**; the third is about **which bound is even in force**:
 
 ``outdoor_drive``
     The weather that the setpoint should answer to. This was once
@@ -29,15 +29,36 @@ veto which signal**:
     is the device's own range, since that is the only limit that is a fact
     rather than a preference. The same reasoning already governs the
     remote-room tracking trim.
+
+``seasonal_band``
+    Which band the other two are talking about. The occupant bias says *this
+    band is wrong for me right now*; the seasonal dial says *this band is wrong
+    for this time of year*, and so it moves the bounds themselves, before
+    anything has been clamped to them. Everything downstream — the position
+    mapping, the clamp, the reported attribute — reads the shifted pair.
 """
 
 from __future__ import annotations
 
-__all__ = ["outdoor_drive", "sum_biases", "compose_target", "clamp_to_device"]
+__all__ = [
+    "outdoor_drive",
+    "sum_biases",
+    "target_from_position",
+    "seasonal_band",
+    "compose_target",
+    "clamp_to_device",
+]
 
 
-def sum_biases(values, limit: float = 2.0) -> float:
-    """Combine several independent reasons to deviate from the comfort band.
+def sum_biases(values, limit: float) -> float:
+    """Sum several independent, individually-capped requests into one bounded total.
+
+    Used for two DIFFERENT authorities -- the occupant biases that deviate from the
+    comfort band, and the seasonal dial that moves it -- which is why ``limit`` is
+    required rather than defaulted. It carried a default of 2.0, inherited from the
+    days when the bias cap was a module constant; a shared helper silently applying
+    one authority's cap to another's is exactly the kind of quiet wrong answer this
+    project keeps finding.
 
     Each contribution is capped at ``+-limit`` and so is the total, so adding
     helpers can never widen the authority the band has already delegated. They
@@ -84,7 +105,7 @@ def compose_target(
     comfort_min: float,
     comfort_max: float,
     bias: float = 0.0,
-    bias_limit: float = 2.0,
+    bias_limit: float,
 ) -> float:
     """Compose the target from the rules' output and the occupant's bias.
 
@@ -122,3 +143,67 @@ def clamp_to_device(
     if device_max is not None:
         value = min(device_max, value)
     return value
+
+
+def target_from_position(
+    position: float,
+    comfort_min: float,
+    comfort_max: float,
+    direction: str = "cool",
+) -> float:
+    """Map an aggressiveness position in [0, 1] onto a commanded target.
+
+    ``position`` is deliberately direction-AGNOSTIC: every channel answers the
+    same question, "how hard should this thing be working", where 0 is fully
+    relaxed and 1 is flat out. Which *temperature* that corresponds to is the
+    direction's business, and the two are mirror images about the band:
+
+    ====== ================= =================
+    p      cool              heat
+    ====== ================= =================
+    0      comfort_max       comfort_min
+    1      comfort_min       comfort_max
+    ====== ================= =================
+
+    This function exists because getting it wrong is not a small error. Every
+    channel was gated to cooling until 2026-09-08, so a heating instance had no
+    weather compensation at all. The obvious repair -- delete the gate -- would
+    have been WORSE than the gap it closed: the old expression
+    ``comfort_max - p * span`` is cooling's mapping, and on the coldest night of
+    the year a heating instance running it would compute p near 1 and aim at
+    ``comfort_min``. Maximum demand, minimum setpoint.
+    """
+    span = comfort_max - comfort_min
+    if direction == "heat":
+        return comfort_min + position * span
+    return comfort_max - position * span
+
+
+def seasonal_band(
+    comfort_min: float,
+    comfort_max: float,
+    shift: float | None,
+    limit: float,
+) -> tuple[float, float]:
+    """Slide the whole comfort band by a seasonal offset, preserving its width.
+
+    This is NOT the occupant bias, and the difference is the reason it is a
+    separate concept rather than another feedback helper. The bias says *the
+    band is wrong for me right now* and is therefore applied AFTER the band has
+    clamped the rules, so it can push past the edge. The seasonal dial says
+    *the band itself is wrong for this time of year* -- the ASHRAE adaptive
+    observation that people acclimatised to July are comfortable several degrees
+    warmer than the same people in January. So it moves the bounds, before
+    anything is clamped to them, and every channel downstream inherits it.
+
+    Chosen over an automatic running-mean term ON PURPOSE: a term that silently
+    walks the comfort band through the year is another rule doing the wrong
+    thing invisibly, and at the moment it is wrong there is nothing to grab.
+    A dial is a thing a person can see and turn.
+
+    ``None`` (an unavailable helper) means no shift, never a guess.
+    """
+    if not shift:
+        return comfort_min, comfort_max
+    shift = max(-limit, min(limit, shift))
+    return comfort_min + shift, comfort_max + shift

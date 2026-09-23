@@ -109,26 +109,39 @@ def build_command_controller(
 
 
 def build_setpoint_controller(
-    outdoor_mild: float,
-    outdoor_torrid: float,
+    outdoor_low: float,
+    outdoor_high: float,
     *,
     resolution: int = 201,
+    direction: str = "cool",
 ) -> FuzzyController:
     """Outdoor drive -> position p in [0, 1] between the comfort bounds.
 
-    ``outdoor_mild`` is the outdoor temperature at or below which cooling may
-    relax fully (p = 0); ``outdoor_torrid`` the temperature at or above which
-    it should be at its most aggressive (p = 1). Four overlapping outdoor
-    terms map one-to-one onto four evenly spaced output singpoints, and the
-    weighted-average defuzzifier interpolates smoothly between them.
+    The two arguments are always the LOW and HIGH ends of the outdoor span, in
+    that order. Which end is the aggressive one is the direction's business,
+    and it is the opposite end in each case:
+
+    ==========  =====================  =====================
+    direction   ``outdoor_low``        ``outdoor_high``
+    ==========  =====================  =====================
+    cool        mild, p = 0            torrid, p = 1
+    heat        frigid, p = 1          mild, p = 0
+    ==========  =====================  =====================
+
+    Same geometry either way -- four overlapping outdoor terms onto four evenly
+    spaced output setpoints, weighted-average defuzzified -- only the rule
+    assignment reverses, which makes the two channels exact reflections of each
+    other about the midpoint of the span. Heating had no weather channel at all
+    before 2026-09-08; see :func:`.targeting.target_from_position` for why
+    simply reusing the cooling one would have been worse than having none.
     """
-    if not outdoor_mild < outdoor_torrid:
-        raise ValueError("outdoor_mild must be < outdoor_torrid")
-    span = outdoor_torrid - outdoor_mild
-    q0 = outdoor_mild
-    q1 = outdoor_mild + span / 3.0
-    q2 = outdoor_mild + 2.0 * span / 3.0
-    q3 = outdoor_torrid
+    if not outdoor_low < outdoor_high:
+        raise ValueError("outdoor_low must be < outdoor_high")
+    span = outdoor_high - outdoor_low
+    q0 = outdoor_low
+    q1 = outdoor_low + span / 3.0
+    q2 = outdoor_low + 2.0 * span / 3.0
+    q3 = outdoor_high
     pad = span * 0.25
     lo, hi = q0 - pad, q3 + pad
 
@@ -152,11 +165,18 @@ def build_setpoint_controller(
             "aggressive": Triangular(2.0 / 3.0, 1.0, 1.0),
         },
     )
+    # The four outdoor terms keep their names from the cooling case, where they
+    # read naturally. Under `heat` the same four bands mean frigid/cold/chilly/
+    # mild from the bottom up, and the rule outputs reverse so that the COLDEST
+    # band is the one that works hardest.
+    ladder = ["relaxed", "easy", "firm", "aggressive"]
+    if direction == "heat":
+        ladder.reverse()
     rules = [
-        Rule((("outdoor", "mild"),), "relaxed"),
-        Rule((("outdoor", "warm"),), "easy"),
-        Rule((("outdoor", "hot"),), "firm"),
-        Rule((("outdoor", "torrid"),), "aggressive"),
+        Rule((("outdoor", "mild"),), ladder[0]),
+        Rule((("outdoor", "warm"),), ladder[1]),
+        Rule((("outdoor", "hot"),), ladder[2]),
+        Rule((("outdoor", "torrid"),), ladder[3]),
     ]
     return FuzzyController(
         [outdoor], position, rules, resolution=resolution, defuzz="weighted_average"
@@ -233,8 +253,10 @@ def build_humidity_controller(
     humidity_humid: float = 75.0,
     *,
     resolution: int = 201,
+    cap: float = 1.0 / 3.0,
+    direction: str = "cool",
 ) -> FuzzyController:
-    """Indoor relative humidity -> position p in [0, 1/3].
+    """Indoor relative humidity -> position p in [0, ``cap``] (default 1/3).
 
     Thermal comfort is a feels-like judgment, not a dry-bulb number: the same
     room temperature reads comfortable at 45% RH and clammy at 75%. This
@@ -242,12 +264,22 @@ def build_humidity_controller(
     compensates the perception and puts the compressor to work as a
     dehumidifier — cooling lower on humid days does double duty.
 
-    Deliberately capped at ONE THIRD of the range: humidity shifts how a
+    Capped at ONE THIRD of the range by default: humidity shifts how a
     temperature feels by roughly a degree on a typical comfort band, it is not
     a heat source. The weather channel keeps sole ownership of the top of the
     range and the load channel of the middle; all three fuse as max() in the
     entity. Indoor RH is the right input — it already integrates outdoor
-    humidity, infiltration and the equipment's own drying.
+    humidity, infiltration and the equipment's own drying. ``cap`` is
+    configurable because how much headroom dampness is allowed to buy is a
+    comfort judgment, not a constant.
+
+    Under ``direction="heat"`` the channel INVERTS, because the perception
+    does. Muggy summer air makes a room feel hotter than the thermometer says,
+    so cooling works harder; dry winter air makes a room feel colder than the
+    thermometer says, so heating works harder. The same reading therefore
+    argues in opposite directions depending on which way the equipment runs,
+    and a channel that ignored that would fight the occupant in one season out
+    of two.
     """
     if not humidity_dry < humidity_humid:
         raise ValueError("humidity_dry must be < humidity_humid")
@@ -265,19 +297,24 @@ def build_humidity_controller(
             "muggy": Trapezoidal(mid, humidity_humid, hi, hi),
         },
     )
+    if not cap > 0:
+        raise ValueError("cap must be > 0")
+    half = cap / 2.0
     position = Variable(
         "position",
         (0.0, 1.0),
         {
-            "none": Triangular(0.0, 0.0, 1.0 / 6.0),
-            "slight": Triangular(0.0, 1.0 / 6.0, 1.0 / 3.0),
-            "firm": Triangular(1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0),
+            "none": Triangular(0.0, 0.0, half),
+            "slight": Triangular(0.0, half, cap),
+            "firm": Triangular(half, cap, cap),
         },
     )
+    # Dry air argues for MORE heat and LESS cooling; muggy air the reverse.
+    dry_end, muggy_end = ("firm", "none") if direction == "heat" else ("none", "firm")
     rules = [
-        Rule((("humidity", "dry"),), "none"),
+        Rule((("humidity", "dry"),), dry_end),
         Rule((("humidity", "pleasant"),), "slight"),
-        Rule((("humidity", "muggy"),), "firm"),
+        Rule((("humidity", "muggy"),), muggy_end),
     ]
     return FuzzyController(
         [humidity], position, rules, resolution=resolution, defuzz="weighted_average"

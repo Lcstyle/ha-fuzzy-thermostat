@@ -6,6 +6,10 @@ escape.
 """
 import pytest
 
+# 0.4.0 made the limit configurable and removed the default (task #49). These
+# tests were written against the old fixed value, so they pass it explicitly.
+LIMIT = 2.0
+
 from custom_components.fuzzy_thermostat.fuzzy.targeting import (
     clamp_to_device,
     compose_target,
@@ -65,8 +69,8 @@ def test_drive_is_none_only_when_both_readings_are_missing():
 
 def test_rules_output_is_clamped_to_the_comfort_band():
     """The band IS a structural bound on what the rules may ask for."""
-    assert compose_target(95.0, comfort_min=69, comfort_max=71) == 71
-    assert compose_target(40.0, comfort_min=69, comfort_max=71) == 69
+    assert compose_target(95.0, comfort_min=69, comfort_max=71, bias_limit=LIMIT) == 71
+    assert compose_target(40.0, comfort_min=69, comfort_max=71, bias_limit=LIMIT) == 69
 
 
 def test_bias_escapes_the_comfort_band():
@@ -77,22 +81,22 @@ def test_bias_escapes_the_comfort_band():
     said they felt cold. The band may veto the rules; it may not veto the
     person.
     """
-    assert compose_target(71.0, comfort_min=69, comfort_max=71, bias=2.0) == 73.0
+    assert compose_target(71.0, comfort_min=69, comfort_max=71, bias_limit=LIMIT, bias=2.0) == 73.0
 
 
 def test_bias_escapes_downward_too():
-    assert compose_target(69.0, comfort_min=69, comfort_max=71, bias=-2.0) == 67.0
+    assert compose_target(69.0, comfort_min=69, comfort_max=71, bias_limit=LIMIT, bias=-2.0) == 67.0
 
 
 def test_bias_applies_on_top_of_the_clamped_value_not_the_raw_rules_output():
     """A wild rules output must not smuggle itself past the band via the bias."""
-    assert compose_target(200.0, comfort_min=69, comfort_max=71, bias=1.0) == 72.0
+    assert compose_target(200.0, comfort_min=69, comfort_max=71, bias_limit=LIMIT, bias=1.0) == 72.0
 
 
 def test_bias_is_capped_at_the_limit():
     """A runaway helper cannot command something absurd."""
-    assert compose_target(71.0, comfort_min=69, comfort_max=71, bias=99.0) == 73.0
-    assert compose_target(69.0, comfort_min=69, comfort_max=71, bias=-99.0) == 67.0
+    assert compose_target(71.0, comfort_min=69, comfort_max=71, bias_limit=LIMIT, bias=99.0) == 73.0
+    assert compose_target(69.0, comfort_min=69, comfort_max=71, bias_limit=LIMIT, bias=-99.0) == 67.0
 
 
 def test_device_bounds_are_the_only_limit_on_the_biased_target():
@@ -102,11 +106,11 @@ def test_device_bounds_are_the_only_limit_on_the_biased_target():
     harmless while the band was the effective ceiling, load-bearing once the
     bias could exceed it.
     """
-    biased = compose_target(71.0, comfort_min=69, comfort_max=71, bias=2.0)
+    biased = compose_target(71.0, comfort_min=69, comfort_max=71, bias_limit=LIMIT, bias=2.0)
     assert biased == 73.0
     assert clamp_to_device(biased, device_max=72.0) == 72.0
 
-    biased_down = compose_target(69.0, comfort_min=69, comfort_max=71, bias=-2.0)
+    biased_down = compose_target(69.0, comfort_min=69, comfort_max=71, bias_limit=LIMIT, bias=-2.0)
     assert biased_down == 67.0
     assert clamp_to_device(biased_down, device_min=68.0) == 68.0
 
@@ -122,7 +126,7 @@ def test_device_clamp_does_not_move_a_value_already_in_range():
 
 
 def test_zero_bias_leaves_the_clamped_target_untouched():
-    assert compose_target(70.3, comfort_min=69, comfort_max=71) == pytest.approx(70.3)
+    assert compose_target(70.3, comfort_min=69, comfort_max=71, bias_limit=LIMIT) == pytest.approx(70.3)
 
 
 def test_the_office_morning_case_end_to_end():
@@ -135,15 +139,15 @@ def test_the_office_morning_case_end_to_end():
     assert drive == 69.0
     p = 0.0                                     # mild => relaxed end
     rules_target = 73 - p * (73 - 69)
-    assert compose_target(rules_target, comfort_min=69, comfort_max=73) == 73.0
+    assert compose_target(rules_target, comfort_min=69, comfort_max=73, bias_limit=LIMIT) == 73.0
 
 
 # -- sum_biases ---------------------------------------------------------
 
 
 def test_a_single_bias_behaves_as_before():
-    assert sum_biases([1.0]) == 1.0
-    assert sum_biases([-2.0]) == -2.0
+    assert sum_biases([1.0], LIMIT) == 1.0
+    assert sum_biases([-2.0], LIMIT) == -2.0
 
 
 def test_independent_biases_sum_rather_than_override():
@@ -151,24 +155,24 @@ def test_independent_biases_sum_rather_than_override():
 
     Whichever was written second must not silently discard the other.
     """
-    assert sum_biases([1.0, 1.0]) == 2.0
-    assert sum_biases([-1.0, 1.0]) == 0.0
+    assert sum_biases([1.0, 1.0], LIMIT) == 2.0
+    assert sum_biases([-1.0, 1.0], LIMIT) == 0.0
 
 
 def test_the_total_is_capped_even_when_each_part_is_legal():
     """Adding helpers must not widen the authority delegated to the bias."""
-    assert sum_biases([2.0, 2.0]) == 2.0
-    assert sum_biases([-2.0, -2.0]) == -2.0
+    assert sum_biases([2.0, 2.0], LIMIT) == 2.0
+    assert sum_biases([-2.0, -2.0], LIMIT) == -2.0
 
 
 def test_each_contribution_is_capped_before_summing():
-    assert sum_biases([99.0, -1.0]) == 1.0
+    assert sum_biases([99.0, -1.0], LIMIT) == 1.0
 
 
 def test_unavailable_helpers_contribute_nothing():
-    assert sum_biases([1.0, None]) == 1.0
-    assert sum_biases([None, None]) == 0.0
+    assert sum_biases([1.0, None], LIMIT) == 1.0
+    assert sum_biases([None, None], LIMIT) == 0.0
 
 
 def test_no_helpers_is_zero():
-    assert sum_biases([]) == 0.0
+    assert sum_biases([], LIMIT) == 0.0
