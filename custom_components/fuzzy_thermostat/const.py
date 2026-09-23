@@ -78,6 +78,9 @@ ATTR_CONTROL_FAULT = "control_fault"
 # The setpoint an advisory instance WOULD send: tracking trim, device clamp and the
 # Schmitt gate applied, exactly as the write path computes it.
 ATTR_ADVISED_SETPOINT = "advised_setpoint"
+# Always published, on or off, so an operator can see which kind of instance this is
+# without running it.
+ATTR_ADVISORY = "advisory"
 ATTR_HUMIDITY_POSITION = "humidity_position"
 ATTR_INDOOR_HUMIDITY = "indoor_humidity"
 ATTR_FEEDBACK_BIAS = "feedback_bias"

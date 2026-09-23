@@ -88,6 +88,7 @@ from .const import (
     ATTR_LOAD_SMOOTHED,
     ATTR_HELD_SETPOINT,
     ATTR_ADVISED_SETPOINT,
+    ATTR_ADVISORY,
     ATTR_CONTROL_FAULT,
     ATTR_REQUESTED_SETPOINT,
     ATTR_OUTDOOR_DRIVE,
@@ -529,7 +530,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return dict(self._extra)
+        return {**self._extra, ATTR_ADVISORY: self._advisory}
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         if (temp := kwargs.get(ATTR_TEMPERATURE)) is not None:

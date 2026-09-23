@@ -82,3 +82,9 @@ def test_advisory_never_switches_power():
     asyncio.run(e._async_actuate(True, reason="t"))
     assert e.hass.calls == []
     assert e._actuator_on is True
+
+
+def test_advisory_flag_is_published_even_when_idle():
+    for flag in (True, False):
+        e = _entity(flag)
+        assert e.extra_state_attributes[C.ATTR_ADVISORY] is flag
