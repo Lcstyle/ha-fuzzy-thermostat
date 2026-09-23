@@ -104,6 +104,17 @@ moves the target, not the power. Setpoint changes are slew-limited so the
 device is never chattered. `control_style: cycling` restores demand-gated
 on/off for devices that genuinely should be duty-cycled.
 
+**Advisory mode** (`advisory: true`, 0.5.0) — for a device that already has
+exactly one automated writer, such as an automation that also enforces a
+freeze floor or an open-window setback. The instance works out the setpoint
+exactly as the write path would (occupant bias, remote-room tracking trim,
+device clamp, the no-flap hold against what the device already holds) and
+publishes it as `advised_setpoint`. It never writes the device or switches its
+power; the owner applies its own constraints and writes the result. Two
+automated writers on one thermostat are how a floor gets undercut without
+anyone noticing, and this keeps the fuzzy layer as the brains while something
+else stays the only hand on the device.
+
 ## Install
 
 HACS → custom repository → this repo (category: integration), or copy
@@ -151,6 +162,7 @@ climate:
 | `trend_window` | 20 min | slope window for the trend input |
 | `manage_power` | `true` | supervisor may switch the device on/off |
 | `control_style` | `setpoint` | supervisor style: govern the setpoint, or `cycling` |
+| `advisory` | `false` | publish the computed setpoint as `advised_setpoint` and never write the device or its power (see Advisory mode) |
 | `companion_entities` | — | stateful fans/dampers switched with the conditioning |
 | `load_sensor` | — | internal-load proxy (enables load compensation) |
 | `load_light` / `load_heavy` | — | sensor values meaning "idle" / "flat out" |
@@ -175,7 +187,11 @@ active_rules:
   - "IF room is hot AND target is comfortable THEN cool (0.55)"
   - "IF room is hot AND trend is falling THEN hold [w=0.7] (0.21)"
 control_reason: "started: demand -0.42"
+advisory: false               # always present, even while the entity is off
 ```
+
+An advisory instance adds `advised_setpoint` (the value its owner should
+write) and says so in `control_reason`.
 
 If a sensor goes unavailable the controller idles and says so — an
 unreadable room is never treated as a comfortable one.
@@ -194,8 +210,12 @@ unreadable room is never treated as a comfortable one.
 ## Tests
 
 ```
-python3 -m pytest tests/    # 51 tests, pure python, no HA install needed
+python3 -m pytest tests/    # pure python, no HA install needed
 ```
+
+`tests/test_advisory.py` exercises the entity itself, so it needs Home
+Assistant importable and skips elsewhere. Run it inside an HA environment
+(the HA container works) to cover the advisory write path.
 
 The suite covers membership geometry, the inference pipeline, the published
 book regression, monotonicity of both controllers, and the
