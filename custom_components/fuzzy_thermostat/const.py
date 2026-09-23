@@ -29,6 +29,10 @@ CONF_TREND_WINDOW = "trend_window"
 CONF_MIN_TEMP = "min_temp"
 CONF_MAX_TEMP = "max_temp"
 CONF_MANAGE_POWER = "manage_power"
+# Advisory: compute and publish the setpoint (ATTR_ADVISED_SETPOINT) but never write the
+# wrapped device. For a zone whose one automated writer is something else (an owner that
+# applies safety floors and other constraints on top of this request).
+CONF_ADVISORY = "advisory"
 CONF_CONTROL_STYLE = "control_style"
 CONF_COMPANION_ENTITIES = "companion_entities"
 STYLE_SETPOINT = "setpoint"
@@ -71,6 +75,9 @@ ATTR_HELD_SETPOINT = "held_setpoint"
 # control_fault says so when the device never showed it back.
 ATTR_REQUESTED_SETPOINT = "requested_setpoint"
 ATTR_CONTROL_FAULT = "control_fault"
+# The setpoint an advisory instance WOULD send: tracking trim, device clamp and the
+# Schmitt gate applied, exactly as the write path computes it.
+ATTR_ADVISED_SETPOINT = "advised_setpoint"
 ATTR_HUMIDITY_POSITION = "humidity_position"
 ATTR_INDOOR_HUMIDITY = "indoor_humidity"
 ATTR_FEEDBACK_BIAS = "feedback_bias"

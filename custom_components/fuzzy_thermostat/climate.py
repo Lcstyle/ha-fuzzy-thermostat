@@ -87,6 +87,7 @@ from .const import (
     ATTR_LOAD_POSITION,
     ATTR_LOAD_SMOOTHED,
     ATTR_HELD_SETPOINT,
+    ATTR_ADVISED_SETPOINT,
     ATTR_CONTROL_FAULT,
     ATTR_REQUESTED_SETPOINT,
     ATTR_OUTDOOR_DRIVE,
@@ -119,6 +120,7 @@ from .const import (
     CONF_LOAD_LIGHT,
     CONF_LOAD_SENSOR,
     CONF_LOAD_SMOOTHING,
+    CONF_ADVISORY,
     CONF_MANAGE_POWER,
     CONF_MARGIN_NARROW,
     CONF_MARGIN_WIDE,
@@ -233,6 +235,9 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
             CONF_TREND_WINDOW, default=timedelta(seconds=DEFAULT_TREND_WINDOW_S)
         ): cv.positive_time_period,
         vol.Optional(CONF_MANAGE_POWER, default=True): cv.boolean,
+        # Advisory: publish the setpoint, never write the device or its power. The
+        # zone's one automated writer (an owner applying floors and caps) acts on it.
+        vol.Optional(CONF_ADVISORY, default=False): cv.boolean,
         # Supervisor control style. `setpoint` (default): the wrapped device
         # stays ON while this entity is on, and the ONLY control output is its
         # setpoint — inverter units modulate their own compressor, and even
@@ -318,6 +323,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         self._forecast_high = config.get(CONF_FORECAST_HIGH_SENSOR)
         self._forecast_weight = config[CONF_FORECAST_WEIGHT]
         self._manage_power = config[CONF_MANAGE_POWER]
+        self._advisory = config[CONF_ADVISORY]
         self._style = config[CONF_CONTROL_STYLE]
         self._companions: list[str] = config.get(CONF_COMPANION_ENTITIES) or []
         self._companion_owned: list[str] = []
@@ -844,7 +850,11 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
                 # here is how one used to go unnoticed.
                 await self._async_send_setpoint()
                 self._extra.update(self._ledger_attrs())
-                self._extra[ATTR_CONTROL_REASON] = self._ledger_reason()
+                self._extra[ATTR_CONTROL_REASON] = (
+                    f"advisory: advising {self._extra.get(ATTR_ADVISED_SETPOINT)}; the zone's owner writes the device"
+                    if self._advisory
+                    else self._ledger_reason()
+                )
             else:
                 self._extra[ATTR_CONTROL_REASON] = (
                     "device is off (switched off externally; re-enable via this entity)"
@@ -911,7 +921,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             return
 
         if self._wrapped:
-            if not self._manage_power:
+            if not self._manage_power or self._advisory:
                 self._actuator_on = on
                 self._last_switch = now
                 return
@@ -1062,6 +1072,13 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             target = held
         else:
             target = round(raw / step) * step
+
+        if self._advisory:
+            # ADVISORY: the value is decided exactly as the write path would decide it, and
+            # published instead of sent. The zone's owner applies its floors and caps and is
+            # the one that writes -- two writers on one thermostat is what this exists to end.
+            self._extra[ATTR_ADVISED_SETPOINT] = target
+            return False
 
         want = HVACMode.HEAT if self._direction == DIRECTION_HEAT else HVACMode.COOL
         before = self._ledger
