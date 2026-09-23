@@ -87,6 +87,8 @@ from .const import (
     ATTR_LOAD_POSITION,
     ATTR_LOAD_SMOOTHED,
     ATTR_HELD_SETPOINT,
+    ATTR_CONTROL_FAULT,
+    ATTR_REQUESTED_SETPOINT,
     ATTR_OUTDOOR_DRIVE,
     ATTR_OUTDOOR_POSITION,
     ATTR_TREND,
@@ -135,6 +137,8 @@ from .const import (
     DEFAULT_MIN_CYCLE_S,
     DEFAULT_SAMPLE_INTERVAL_S,
     DEFAULT_LOAD_SMOOTHING_S,
+    DEFAULT_CONFIRM_AFTER_S,
+    DEFAULT_MAX_SEND_ATTEMPTS,
     DEFAULT_FORECAST_WEIGHT,
     DEFAULT_TREND_WINDOW_S,
     DEFAULT_HUMIDITY_CAP,
@@ -150,6 +154,7 @@ from .fuzzy import (
     build_load_controller,
     build_setpoint_controller,
 )
+from .fuzzy.actuation import Ledger, plan
 from .fuzzy.targeting import (
     clamp_to_device,
     compose_target,
@@ -446,7 +451,12 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         self._samples: deque[tuple[datetime, float]] = deque(maxlen=64)
         self._actuator_on = False
         self._last_switch: datetime | None = None
-        self._last_sent_setpoint: float | None = None
+        # What was asked of the wrapped device and whether it has shown it back. A
+        # service call returning is not the device holding the value -- see
+        # fuzzy/actuation.py for the Kumo case that made this necessary.
+        self._ledger = Ledger()
+        self._confirm_after = timedelta(seconds=DEFAULT_CONFIRM_AFTER_S)
+        self._max_send_attempts = DEFAULT_MAX_SEND_ATTEMPTS
         self._effective_target: float | None = None
         self._extra: dict[str, Any] = {ATTR_CONTROL_REASON: "not yet evaluated"}
         self._unsub: list[Any] = []
@@ -802,7 +812,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             ATTR_LOAD_SMOOTHED: round(self._load_ema, 1)
             if self._load_ema is not None
             else None,
-            ATTR_HELD_SETPOINT: self._last_sent_setpoint,
+            **self._ledger_attrs(),
             ATTR_HUMIDITY_POSITION: round(p_humidity, 3)
             if p_humidity is not None
             else None,
@@ -828,14 +838,13 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             # Setpoint governance: no power gating at all. The device stays on
             # and its own controller — inverter ramp or fixed-speed hysteresis
             # — meets the (fuzzy-computed, channel-fused) setpoint we maintain.
-            if self._actuator_on:
+            if self._actuator_on or self._power_on_pending():
+                # A power-on we sent is still owed its read-back while the unit reports
+                # off: that is exactly what a lost command looks like, and skipping it
+                # here is how one used to go unnoticed.
                 await self._async_send_setpoint()
-                self._extra[ATTR_HELD_SETPOINT] = self._last_sent_setpoint
-                self._extra[ATTR_CONTROL_REASON] = (
-                    f"governing setpoint {self._last_sent_setpoint:g}"
-                    if self._last_sent_setpoint is not None
-                    else "governing (device setpoint unknown)"
-                )
+                self._extra.update(self._ledger_attrs())
+                self._extra[ATTR_CONTROL_REASON] = self._ledger_reason()
             else:
                 self._extra[ATTR_CONTROL_REASON] = (
                     "device is off (switched off externally; re-enable via this entity)"
@@ -872,8 +881,15 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         elif self._actuator_on and want_off:
             await self._async_actuate(False, reason=f"demand {demand:+.2f}")
 
-        if self._wrapped and self._actuator_on:
+        if self._power_on_pending() and not self._actuator_on and want_off:
+            # Demand went away before the unit showed our power-on. Abandon the
+            # request rather than let its retry start a unit nothing wants running.
+            self._ledger = Ledger()
+        if self._wrapped and (self._actuator_on or self._power_on_pending()):
             await self._async_send_setpoint()
+            self._extra.update(self._ledger_attrs())
+            if self._ledger.fault:
+                self._extra[ATTR_CONTROL_REASON] = self._ledger_reason()
         self.async_write_ha_state()
 
     # -- actuation ---------------------------------------------------------
@@ -911,15 +927,26 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
             if wstate is not None and wstate.state == mode:
                 self._actuator_on = on
                 self._last_switch = now
+                if not on:
+                    self._ledger = Ledger()
                 return
-            await self.hass.services.async_call(
-                CLIMATE_DOMAIN,
-                SERVICE_SET_HVAC_MODE,
-                {ATTR_ENTITY_ID: self._wrapped, "hvac_mode": mode},
-                blocking=True,
-            )
-            if on:
-                self._last_sent_setpoint = None  # re-send after power-on
+            if on and self._effective_target is not None:
+                # POWER-ON IS ONE CALL: mode and setpoint go out together (or the mode
+                # alone, when the unit already holds the setpoint). Two calls is how a
+                # Kumo head lost its setpoint on 2026-09-23 -- the integration still had
+                # the mode cached as off and dropped the temperature with only a log
+                # warning. A person enabling this entity (force) starts a fresh request;
+                # an automatic re-start leaves a pending or faulted one to the ledger, so
+                # a unit that will not power on is surfaced rather than re-tried forever.
+                if force or not self._power_on_pending():
+                    self._ledger = Ledger()
+                sent = await self._async_send_setpoint(power_on=True)
+                if not sent and not self._power_on_pending():
+                    await self._async_set_wrapped_mode(mode)
+            else:
+                await self._async_set_wrapped_mode(mode)
+                if not on:
+                    self._ledger = Ledger()
         else:
             switch = self._heater or self._cooler
             await self.hass.services.async_call(
@@ -981,7 +1008,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         self._load_ema_ts = now
         return self._load_ema
 
-    async def _async_send_setpoint(self) -> None:
+    async def _async_send_setpoint(self, *, power_on: bool = False) -> bool:
         """Supervisor mode: govern the wrapped device's setpoint, gently.
 
         STATE-DRIVEN OUTPUT, not periodic re-assertion: the target is rounded
@@ -993,7 +1020,7 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         """
         wstate = self.hass.states.get(self._wrapped)
         if wstate is None or wstate.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            return
+            return False
         step = wstate.attributes.get("target_temp_step") or 0.5
         raw = self._effective_target
         # REMOTE-ROOM TRACKING: when the wrapped device senses a DIFFERENT room
@@ -1026,28 +1053,79 @@ class FuzzyThermostat(ClimateEntity, RestoreEntity):
         held = wstate.attributes.get(ATTR_TEMPERATURE)
         if held is not None:
             held = float(held)
-            # Schmitt gate: the setpoint the device already holds is the
-            # anchor. Do not move off it until the target is DECISIVELY
-            # elsewhere (3/4 of a device step) — residual channel wobble
-            # around a grid boundary must never flap the command. A real
-            # change (a degree of weather, sustained load) clears this
-            # easily; noise never does.
-            if abs(raw - held) < 0.75 * step:
-                self._last_sent_setpoint = held
-                return
-        target = round(raw / step) * step
-        if held is not None and abs(held - target) < step / 2:
-            self._last_sent_setpoint = target  # device already there
-            return
-        if (
-            self._last_sent_setpoint is not None
-            and abs(target - self._last_sent_setpoint) < step / 2
-        ):
-            return
+        # Schmitt gate: the setpoint the device already holds is the anchor. Do not
+        # move off it until the target is DECISIVELY elsewhere (3/4 of a device step)
+        # -- residual channel wobble around a grid boundary must never flap the
+        # command. A real change (a degree of weather, sustained load) clears this
+        # easily; noise never does.
+        if held is not None and abs(raw - held) < 0.75 * step:
+            target = held
+        else:
+            target = round(raw / step) * step
+
+        want = HVACMode.HEAT if self._direction == DIRECTION_HEAT else HVACMode.COOL
+        before = self._ledger
+        cmd, self._ledger = plan(
+            before,
+            target=target,
+            want_mode=want.value,
+            reported_mode=wstate.state,
+            reported_setpoint=held,
+            step=step,
+            now=dt_util.utcnow(),
+            may_set_mode=power_on,
+            confirm_after=self._confirm_after,
+            max_attempts=self._max_send_attempts,
+        )
+        if self._ledger.fault and not before.fault:
+            _LOGGER.warning("%s: %s", self.entity_id, self._ledger.fault)
+        if cmd is None:
+            return False
+        if cmd.temperature is None:
+            await self._async_set_wrapped_mode(cmd.hvac_mode)
+            return True
+        data: dict[str, Any] = {ATTR_ENTITY_ID: self._wrapped, ATTR_TEMPERATURE: cmd.temperature}
+        if cmd.hvac_mode is not None:
+            data["hvac_mode"] = cmd.hvac_mode
+        await self.hass.services.async_call(
+            CLIMATE_DOMAIN, SERVICE_SET_TEMPERATURE, data, blocking=True
+        )
+        return True
+
+    async def _async_set_wrapped_mode(self, mode: str) -> None:
         await self.hass.services.async_call(
             CLIMATE_DOMAIN,
-            SERVICE_SET_TEMPERATURE,
-            {ATTR_ENTITY_ID: self._wrapped, ATTR_TEMPERATURE: target},
+            SERVICE_SET_HVAC_MODE,
+            {ATTR_ENTITY_ID: self._wrapped, "hvac_mode": mode},
             blocking=True,
         )
-        self._last_sent_setpoint = target
+
+    def _power_on_pending(self) -> bool:
+        """A power-on we sent that the device has not shown back (including a faulted one)."""
+        return self._ledger.requested_mode is not None and not self._ledger.confirmed
+
+    def _ledger_attrs(self) -> dict[str, Any]:
+        led = self._ledger
+        return {
+            ATTR_HELD_SETPOINT: led.requested_setpoint if led.confirmed else None,
+            ATTR_REQUESTED_SETPOINT: led.requested_setpoint,
+            ATTR_CONTROL_FAULT: led.fault,
+        }
+
+    def _ledger_reason(self) -> str:
+        led = self._ledger
+        if led.fault:
+            return f"FAULT: {led.fault}"
+        if led.requested_setpoint is None:
+            return "governing (device setpoint unknown)"
+        if not led.confirmed:
+            mode = f"{led.requested_mode} / " if led.requested_mode else ""
+            return f"requested {mode}{led.requested_setpoint:g}, awaiting the device"
+        wstate = self.hass.states.get(self._wrapped) if self._wrapped else None
+        now_held = wstate.attributes.get(ATTR_TEMPERATURE) if wstate is not None else None
+        if now_held is not None and abs(float(now_held) - led.requested_setpoint) >= 0.5:
+            return (
+                f"device changed externally to {float(now_held):g} (was "
+                f"{led.requested_setpoint:g}); respected until the target moves"
+            )
+        return f"governing setpoint {led.requested_setpoint:g}"

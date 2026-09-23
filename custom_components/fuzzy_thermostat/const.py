@@ -66,6 +66,11 @@ ATTR_OUTDOOR_POSITION = "outdoor_position"
 ATTR_LOAD_POSITION = "load_position"
 ATTR_LOAD_SMOOTHED = "load_smoothed"
 ATTR_HELD_SETPOINT = "held_setpoint"
+# The read-back ledger (fuzzy/actuation.py). held_setpoint is only ever a value the
+# wrapped device has REPORTED back; requested_setpoint is what was asked for, and
+# control_fault says so when the device never showed it back.
+ATTR_REQUESTED_SETPOINT = "requested_setpoint"
+ATTR_CONTROL_FAULT = "control_fault"
 ATTR_HUMIDITY_POSITION = "humidity_position"
 ATTR_INDOOR_HUMIDITY = "indoor_humidity"
 ATTR_FEEDBACK_BIAS = "feedback_bias"
@@ -76,6 +81,11 @@ ATTR_TRACKING_TRIM = "tracking_trim"
 # Defaults that do not depend on the unit system.
 DEFAULT_SAMPLE_INTERVAL_S = 300
 DEFAULT_LOAD_SMOOTHING_S = 900
+# How long a wrapped device gets to report a command back before it is retried, and how
+# many sends (the original included) before a mismatch is surfaced as a fault. A Kumo
+# head took ~60 s to report a new setpoint in the 2026-09-23 test.
+DEFAULT_CONFIRM_AFTER_S = 120
+DEFAULT_MAX_SEND_ATTEMPTS = 3
 # How much of the forecast high to fold into the outdoor drive. 0 = follow the
 # weather that actually exists; 1 = the old max(now, forecast) behaviour, which
 # reasons as though it were already the hottest moment of the day from midnight
